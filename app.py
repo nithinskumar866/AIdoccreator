@@ -1,13 +1,20 @@
 from flask import Flask, request, render_template, send_file
 from compare_docs import load_document, compare_textbook_notes, validate_homework, save_to_docx
+from dotenv import load_dotenv
 import os
-import shutil
+
+# ✅ Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 
+# ✅ Upload folder
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
+
+# ✅ Port configuration (Render uses PORT 10000 by default)
+PORT = int(os.getenv("PORT", 10000))
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -67,5 +74,7 @@ def download():
     else:
         return "File not found."
 
+
+# ✅ Production-ready configuration for Render
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=PORT, debug=False)
