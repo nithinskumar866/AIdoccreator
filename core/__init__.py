@@ -1,0 +1,1 @@
+"""DocuMentor application core."""

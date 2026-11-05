@@ -1,27 +1,16 @@
-# ✅ Use official Python image
-FROM python:3.10-slim
+FROM python:3.12-slim
 
-# ✅ Set working directory
 WORKDIR /app
-
-# ✅ Install system dependencies
-RUN apt-get update && \
-    apt-get install -y \
-    build-essential \
-    python3-dev \
-    libpq-dev \
-    cmake \
-    && rm -rf /var/lib/apt/lists/*
-
-# ✅ Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# ✅ Copy app files
 COPY . .
 
-# ✅ Set environment variables
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 DOCUMENTOR_DATA_DIR=/app/data
+RUN useradd --create-home app && mkdir -p /app/data && chown -R app /app
+USER app
+VOLUME /app/data
+EXPOSE 8080
 
-# ✅ Start the app
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080"]
+# Binds inside the container only. Publish it as 127.0.0.1:10000:8080 (see the README).
+# One worker keeps background tasks and the SQLite database in a single process.
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "120"]

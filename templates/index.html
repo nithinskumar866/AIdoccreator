@@ -1,549 +1,70 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DocuMentor - AI Education Assistant</title>
-    <script src="https://kit.fontawesome.com/a076d05399.js"></script>
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600&display=swap" rel="stylesheet">
-
-    <style>
-        :root {
-            --primary: #6366f1;
-            --secondary: #4f46e5;
-            --accent: #10b981;
-            --dark: #1e293b;
-            --light: #f8fafc;
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Poppins', sans-serif;
-        }
-
-        body {
-            background: linear-gradient(135deg, #0f172a, #1e293b);
-            color: var(--light);
-            min-height: 100vh;
-            overflow: hidden;
-        }
-
-        .container {
-            display: grid;
-            grid-template-columns: 300px 1fr;
-            height: 100vh;
-            background: rgba(255, 255, 255, 0.05);
-            backdrop-filter: blur(20px);
-        }
-
-        /* Left Panel */
-        .sidebar {
-            background: rgba(15, 23, 42, 0.9);
-            padding: 2rem;
-            border-right: 1px solid rgba(255, 255, 255, 0.1);
-            height: 100vh;
-            overflow-y: auto;
-        }
-
-        .upload-section {
-            position: relative;
-            padding: 1.5rem;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 12px;
-            margin-bottom: 2rem;
-            transition: transform 0.3s ease;
-        }
-
-        .upload-section:hover {
-            transform: translateY(-3px);
-        }
-
-        .upload-card {
-            position: relative;
-            margin-bottom: 1.5rem;
-            border: 2px dashed rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            padding: 1.5rem;
-            transition: all 0.3s ease;
-        }
-
-        .upload-card:hover {
-            border-color: var(--accent);
-            background: rgba(16, 185, 129, 0.05);
-        }
-
-        .upload-btn {
-            display: flex;
-            align-items: center;
-            gap: 0.8rem;
-            background: var(--primary);
-            padding: 1rem 1.5rem;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            color: white;
-            border: none;
-            width: 100%;
-        }
-
-        .upload-btn:hover {
-            background: var(--secondary);
-            transform: translateY(-2px);
-            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
-        }
-
-        /* Action Buttons */
-        .action-buttons {
-            display: grid;
-            gap: 1rem;
-            margin-top: 2rem;
-        }
-
-        .action-btn {
-            padding: 1.2rem;
-            border-radius: 8px;
-            border: none;
-            color: white;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 1rem;
-            font-weight: 500;
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-        }
-
-        .action-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
-        }
-
-        /* Main Content */
-        .main-content {
-            padding: 3rem;
-            height: 100vh;
-            overflow-y: auto;
-            background: url('data:image/svg+xml,<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.005" numOctaves="3"/></filter><rect width="100%" height="100%" filter="url(%23n)" opacity="0.2"/></svg>');
-        }
-
-        .query-section {
-            max-width: 800px;
-            margin: 0 auto;
-            background: rgba(15, 23, 42, 0.8);
-            padding: 2rem;
-            border-radius: 16px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-        }
-
-        #query {
-            width: 100%;
-            padding: 1.2rem;
-            background: rgba(255, 255, 255, 0.05);
-            border: 2px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            color: white;
-            font-size: 1rem;
-            margin-bottom: 1.5rem;
-            transition: all 0.3s ease;
-        }
-
-        #query:focus {
-            border-color: var(--accent);
-            outline: none;
-            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
-        }
-
-        #ask-btn {
-            background: linear-gradient(135deg, var(--accent), #059669);
-            width: 100%;
-            padding: 1.2rem;
-            border-radius: 8px;
-            border: none;
-            color: white;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-
-        #ask-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
-        }
-
-        .response-section {
-            margin-top: 2rem;
-            background: rgba(15, 23, 42, 0.8);
-            border-radius: 16px;
-            padding: 2rem;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .ai-response-header {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-            margin-bottom: 1.5rem;
-        }
-
-        .ai-response-header h3 {
-            color: var(--accent);
-            font-size: 1.5rem;
-        }
-
-        /* Loader Animation */
-        .loader {
-            display: none;
-            text-align: center;
-            padding: 2rem;
-        }
-
-        .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid rgba(255, 255, 255, 0.1);
-            border-top-color: var(--accent);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-            to {
-                transform: rotate(360deg);
-            }
-        }
-
-        /* Customization Options */
-        .custom-options {
-            margin: 1.5rem 0;
-            background: rgba(255, 255, 255, 0.05);
-            padding: 1.5rem;
-            border-radius: 12px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        #custom-instructions {
-            width: 100%;
-            min-height: 100px;
-            padding: 1rem;
-            background: rgba(255, 255, 255, 0.05);
-            border: 2px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            color: white;
-            resize: vertical;
-        }
-
-        /* Download Links */
-        .download-links {
-            margin-top: 2rem;
-            display: flex;
-            gap: 1rem;
-            justify-content: center;
-        }
-
-        .download-link {
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            padding: 1rem 2rem;
-            border-radius: 8px;
-            text-decoration: none;
-            color: white;
-            display: flex;
-            align-items: center;
-            gap: 0.8rem;
-            transition: all 0.3s ease;
-        }
-
-        .download-link:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
-        }
-
-        /* Floating Animation */
-        @keyframes float {
-            0% {
-                transform: translateY(0px);
-            }
-
-            50% {
-                transform: translateY(-20px);
-            }
-
-            100% {
-                transform: translateY(0px);
-            }
-        }
-
-        .floating-icon {
-            animation: float 3s ease-in-out infinite;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocuMentor</title>
+  <meta name="description" content="Check homework, write new assignments and review notes against your textbook.">
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
 </head>
-
 <body>
-    <div class="container">
-        <!-- Left Sidebar -->
-        <div class="sidebar">
-            <div class="upload-section">
-                <h2 class="floating-icon"><i class="fas fa-cloud-upload-alt"></i> Upload Documents</h2>
+  <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h13V10"/><path d="M10 20v-6h4v6"/></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5C4 4.7 4.7 4 5.5 4H11c.6 0 1 .4 1 1v15c0-.8-.7-1.5-1.5-1.5h-5A1.5 1.5 0 0 1 4 17V5.5Z"/><path d="M20 5.5c0-.8-.7-1.5-1.5-1.5H13c-.6 0-1 .4-1 1v15c0-.8.7-1.5 1.5-1.5h5A1.5 1.5 0 0 0 20 17V5.5Z"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 4H6.5A1.5 1.5 0 0 0 5 5.5v14A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-14A1.5 1.5 0 0 0 17.500 4H15"/><rect x="9" y="3" width="6" height="3" rx="1"/><path d="m9 14 2 2 4-4.500"/></symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.500 13.800 9l5.700 1.800-5.700 1.800L12 18.500l-1.800-5.900L4.500 10.800 10.200 9 12 3.500Z"/><path d="M19 16v4M17 18h4"/></symbol>
+      <symbol id="i-notes" viewBox="0 0 24 24"><path d="M6.500 3H14l5 5v11.500a1.500 1.500 0 0 1-1.500 1.500h-11A1.500 1.500 0 0 1 5 19.500v-15A1.500 1.500 0 0 1 6.500 3Z"/><path d="M14 3v5h5M8.500 13h7M8.500 17h4.500"/></symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 6.500A2.500 2.500 0 0 1 6.500 4h11A2.500 2.500 0 0 1 20 6.500v7a2.500 2.500 0 0 1-2.500 2.500H11l-4.500 4v-4A2.500 2.500 0 0 1 4 13.500v-7Z"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.500"/><path d="M12 7v5l3.500 2"/></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V5M7.500 9.500 12 5l4.500 4.500"/><path d="M4.500 15v3.500A1.500 1.500 0 0 0 6 20h12a1.500 1.500 0 0 0 1.500-1.500V15"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.500 10.500 12 15l4.500-4.500"/><path d="M4.500 16v2.500A1.500 1.500 0 0 0 6 20h12a1.500 1.500 0 0 0 1.500-1.500V16"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.500 7h15M9.500 7V4.500h5V7M6.500 7l1 13h9l1-13M10 11v5.500M14 11v5.500"/></symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.100 2.100 0 0 0-3-3L5 17l-1 3Z"/></symbol>
+      <symbol id="i-yes" viewBox="0 0 24 24"><path d="m5 12.500 4.500 4.500L19 7.500"/></symbol>
+      <symbol id="i-no" viewBox="0 0 24 24"><path d="M6.500 6.500 17.500 17.500M17.500 6.500 6.500 17.500"/></symbol>
+      <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4 2.800 19.500h18.400L12 4Z"/><path d="M12 10v4.500M12 17v.200"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.500 12S6 5.500 12 5.500 21.500 12 21.500 12 18 18.500 12 18.500 2.500 12 2.500 12Z"/><circle cx="12" cy="12" r="2.800"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12 20 4.500 15.500 20l-3.500-6.500L4 12Z"/><path d="M12 13.500 20 4.500"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.600 5.600 7 7M17 17l1.400 1.400M5.600 18.400 7 17M17 7l1.400-1.400"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.500A8.500 8.500 0 0 1 9.500 4 8.500 8.500 0 1 0 20 14.500Z"/></symbol>
+      <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.500"/><path d="M12 3.500v17"/><path d="M12 7c2.500 0 5 2 5 5s-2.500 5-5 5" class="fill-current"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.500" r="4"/><path d="m11 12.500 8.500-8.500M16 7.500l3 3"/></symbol>
+    </defs>
+  </svg>
 
-                <div class="upload-card">
-                    <label for="textbook" class="upload-btn">
-                        <i class="fas fa-book-open"></i> Textbook
-                    </label>
-                    <input type="file" accept=".docx,.pdf" id="textbook" hidden>
-                    <div class="file-name" id="textbook-name"></div>
-                </div>
+  <a class="skip" href="#view">Skip to content</a>
+  <div class="shell">
+    <aside class="side">
+      <a class="brand" href="#/">
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-book"/></svg></span>
+        <span>DocuMentor</span>
+      </a>
+      <nav id="nav" aria-label="Main">
+        <a href="#/" data-route="home"><svg class="icon" aria-hidden="true"><use href="#i-home"/></svg><span>Home</span></a>
+        <a href="#/library" data-route="library"><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg><span>Library</span></a>
+        <p class="nav-label">Tools</p>
+        <a href="#/check" data-route="check"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>Check homework</span></a>
+        <a href="#/create" data-route="create"><svg class="icon" aria-hidden="true"><use href="#i-spark"/></svg><span>Create homework</span></a>
+        <a href="#/notes" data-route="notes"><svg class="icon" aria-hidden="true"><use href="#i-notes"/></svg><span>Review notes</span></a>
+        <a href="#/ask" data-route="ask"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg><span>Ask</span></a>
+        <p class="nav-label">Saved</p>
+        <a href="#/history" data-route="history"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span>History</span></a>
+      </nav>
+      <div class="side-foot">
+        <div class="model" id="model-status" title="The Gemini model in use"></div>
+        <button class="btn ghost small" id="theme-toggle" type="button"></button>
+      </div>
+    </aside>
+    <main id="view" tabindex="-1"></main>
+  </div>
 
-                <div class="upload-card">
-                    <label for="notes" class="upload-btn">
-                        <i class="fas fa-sticky-note"></i> Notes
-                    </label>
-                    <input type="file" accept=".docx,.pdf" id="notes" hidden>
-                    <div class="file-name" id="notes-name"></div>
-                </div>
-
-                <div class="upload-card">
-                    <label for="homework" class="upload-btn">
-                        <i class="fas fa-file-code"></i> Homework (Optional)
-                    </label>
-                    <input type="file" id="homework" hidden>
-                    <div class="file-name" id="homework-name"></div>
-                </div>
-            </div>
-
-            <div class="action-buttons">
-                <button class="action-btn" id="check-btn">
-                    <i class="fas fa-check-circle"></i> Check Homework
-                </button>
-                <button class="action-btn" id="create-btn">
-                    <i class="fas fa-plus-circle"></i> Create Homework
-                </button>
-            </div>
-
-            <div class="loader" id="process-loader">
-                <div class="spinner"></div>
-                <p id="loader-text">Analyzing Documents...</p>
-            </div>
-        </div>
-
-        <!-- Main Content -->
-        <div class="main-content">
-            <div class="query-section">
-                <div class="ai-response-header">
-                    <i class="fas fa-robot" style="font-size: 2rem; color: var(--accent);"></i>
-                    <h3>AI Document Assistant</h3>
-                </div>
-
-                <div class="custom-options">
-                    <h4><i class="fas fa-cog"></i> Customization Options</h4>
-                    <textarea id="custom-instructions"
-                        placeholder="Example: 'Generate 5 algebra questions: 2 MCQs (1 mark each), 3 problem sums (5 marks each)...'"></textarea>
-                    <button id="custom-generate-btn" class="action-btn" style="margin-top: 1rem;">
-                        <i class="fas fa-magic"></i> Generate Custom Homework
-                    </button>
-                </div>
-
-                <input type="text" id="query" placeholder="Ask anything or provide instructions...">
-
-                <button id="ask-btn">
-                    <i class="fas fa-paper-plane"></i> Process Request
-                </button>
-            </div>
-
-            <div class="response-section">
-                <div class="ai-response-header">
-                    <i class="fas fa-comment-dots"></i>
-                    <h3>AI Response</h3>
-                </div>
-
-                <div id="response-box">
-                    <p id="response-text"></p>
-                    <div class="download-links" id="download-links"></div>
-                </div>
-
-                <div class="loader" id="query-loader">
-                    <div class="spinner"></div>
-                    <p>Generating Magic...</p>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        document.addEventListener("DOMContentLoaded", function () {
-            function updateFileName(inputId, nameId) {
-                document.getElementById(inputId).addEventListener('change', function (e) {
-                    document.getElementById(nameId).textContent = e.target.files[0].name;
-                });
-            }
-
-            updateFileName('textbook', 'textbook-name');
-            updateFileName('notes', 'notes-name');
-            updateFileName('homework', 'homework-name');
-
-            // Handle both check and create actions
-            function handleAction(action) {
-                const textbook = document.getElementById('textbook').files[0];
-                const notes = document.getElementById('notes').files[0];
-                const homework = document.getElementById('homework').files[0];
-
-                if (!textbook || !notes) {
-                    alert('Please upload at least the textbook and notes!');
-                    return;
-                }
-
-                if (action === 'check' && !homework) {
-                    alert('Please upload homework to check!');
-                    return;
-                }
-
-                const formData = new FormData();
-                formData.append('textbook', textbook);
-                formData.append('notes', notes);
-                if (homework) formData.append('homework', homework);
-
-                const endpoint = action === 'check' ? '/check' : '/create';
-                document.getElementById('loader-text').textContent =
-                    action === 'check' ? 'Checking Homework...' : 'Creating Homework...';
-
-                // Show loader
-                document.getElementById('process-loader').style.display = 'block';
-                document.querySelectorAll('.action-btn').forEach(btn => btn.disabled = true);
-
-                fetch(endpoint, {
-                    method: 'POST',
-                    body: formData
-                })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.error) {
-                            alert(data.error);
-                        } else {
-                            const downloadHTML = `
-                        <a href="${data.download_link}" class="download-link">
-                            <i class="fas fa-file-download"></i> Download ${action === 'check' ? 'Corrected' : 'New'} Homework
-                        </a>
-                    `;
-                            document.getElementById('download-links').innerHTML = downloadHTML;
-                        }
-                    })
-                    .catch(error => console.error('Error:', error))
-                    .finally(() => {
-                        document.getElementById('process-loader').style.display = 'none';
-                        document.querySelectorAll('.action-btn').forEach(btn => btn.disabled = false);
-                    });
-            }
-
-            // Custom Homework Generation
-            document.getElementById('custom-generate-btn').addEventListener('click', function () {
-                const textbook = document.getElementById('textbook').files[0];
-                const notes = document.getElementById('notes').files[0];
-                const customInstructions = document.getElementById('custom-instructions').value.trim();
-
-                if (!textbook || !notes) {
-                    alert('Please upload the textbook and notes first!');
-                    return;
-                }
-
-                if (!customInstructions) {
-                    alert('Please enter your custom requirements!');
-                    return;
-                }
-
-                const formData = new FormData();
-                formData.append('textbook', textbook);
-                formData.append('notes', notes);
-                formData.append('custom_instructions', customInstructions);
-
-                document.getElementById('loader-text').textContent = 'Generating Custom Homework...';
-                document.getElementById('process-loader').style.display = 'block';
-                this.disabled = true;
-
-                fetch('/generate-custom', {
-                    method: 'POST',
-                    body: formData
-                })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.error) {
-                            alert(data.error);
-                        } else {
-                            const downloadHTML = `
-                                <a href="${data.download_link}" class="download-link">
-                                    <i class="fas fa-file-download"></i> Download Custom Homework
-                                </a>
-                            `;
-                            document.getElementById('download-links').innerHTML = downloadHTML;
-                        }
-                    })
-                    .catch(error => console.error('Error:', error))
-                    .finally(() => {
-                        document.getElementById('process-loader').style.display = 'none';
-                        this.disabled = false;
-                    });
-            });
-
-            // Event listeners for buttons
-            document.getElementById('check-btn').addEventListener('click', () => handleAction('check'));
-            document.getElementById('create-btn').addEventListener('click', () => handleAction('create'));
-
-            // Ask question functionality
-            // Modify the ask-btn event listener:
-            // Modify the ask-btn event listener in index.html:
-            document.getElementById('ask-btn').addEventListener('click', function () {
-                const question = document.getElementById('query').value.trim();
-                if (!question) {
-                    alert('Please enter a question!');
-                    return;
-                }
-
-                const textbook = document.getElementById('textbook').files[0];
-                const notes = document.getElementById('notes').files[0];
-
-                if (!textbook || !notes) {
-                    alert('Please upload both textbook and notes first!');
-                    return;
-                }
-
-                document.getElementById('query-loader').style.display = 'block';
-                this.disabled = true;
-
-                const formData = new FormData();
-                formData.append('textbook', textbook);
-                formData.append('notes', notes);
-                formData.append('prompt', question);
-
-                fetch('/prompt', {
-                    method: 'POST',
-                    body: formData
-                })
-                    .then(response => {
-                        if (!response.ok) throw new Error('Server error');
-                        return response.json();
-                    })
-                    .then(data => {
-                        if (data.error) throw new Error(data.error);
-                        document.getElementById('response-text').textContent = data.response;
-                    })
-                    .catch(error => {
-                        console.error('Error:', error);
-                        alert(`Error: ${error.message || 'Processing failed'}`);
-                    })
-                    .finally(() => {
-                        document.getElementById('query-loader').style.display = 'none';
-                        this.disabled = false;
-                    });
-            });
-
-
-
-
-        });
-    </script>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+  <dialog id="dialog"></dialog>
+  <input type="file" id="file-input" multiple hidden accept=".docx,.pdf,.txt,.md">
 </body>
-
 </html>
