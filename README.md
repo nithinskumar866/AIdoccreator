@@ -15,8 +15,10 @@ It runs on your own computer, with no account and no login.
 ## Contents
 
 - [What it does](#what-it-does)
+- [Workflow](#workflow): how the tools fit together
+- [Architecture](#architecture): the parts of the app and how a task runs
 - [Quick start](#quick-start)
-- [A full walkthrough](#a-full-walkthrough): one teaching unit from start to finish
+- [A full walkthrough](#a-full-walkthrough): one teaching unit from start to finish, with screenshots
 - [How it keeps you in control](#how-it-keeps-you-in-control)
 - [Settings](#settings) · [Privacy and security](#privacy-and-security) · [Project layout](#project-layout) · [Tests](#tests)
 
@@ -35,6 +37,130 @@ It runs on your own computer, with no account and no login.
 
 It reads `.docx`, `.pdf`, `.txt` and `.md` files. Long documents are searched in full rather
 than cut off. Scanned PDFs need OCR first.
+
+## Workflow
+
+Everything starts from documents in the Library. Each tool produces a result you review, and
+no suggestion reaches an export until you've accepted it.
+
+```mermaid
+flowchart TD
+    A["Add a textbook, notes, homework<br/>and students' work to the Library"] --> B{"Choose a tool"}
+
+    B --> C["Check homework"]
+    B --> D["Create homework"]
+    B --> E["Review notes"]
+    B --> F["Ask your documents"]
+
+    C --> R["Review each question<br/>accept, reject or edit suggestions"]
+    D --> R
+    R --> CMP["Compare versions<br/>original beside final"]
+    R --> K["Write the answer key"]
+    R --> X1["Export to Word<br/>homework, answer key, changes report"]
+    R --> SB["Save questions to the bank"]
+
+    SB --> QB["Question bank<br/>filter, tick or pick for me"]
+    QB --> NA["New assignment"]
+    QB -. "bank is short" .-> AW["AI writes the missing questions"]
+    AW --> NA
+    NA --> R
+
+    R --> G["Grade answers<br/>upload one file per student"]
+    K -. "written first if missing" .-> G
+    G --> GR["Confirm or change each suggested mark<br/>flagged answers one by one"]
+    GR --> X2["Word report<br/>and CSV of confirmed marks"]
+
+    E --> RN["Apply or skip each fix"]
+    RN --> X3["Export corrected notes to Word"]
+
+    F --> FA["Cited answers<br/>with follow-up questions"]
+```
+
+Every result is saved to **History** as you go, so you can reopen it, keep reviewing and export
+again later.
+
+## Architecture
+
+DocuMentor is one small Python web app that runs on your computer. The page in your browser
+talks to it through a JSON API. Long AI tasks run in the background while the page shows their
+progress. Only passages from your documents leave your computer, sent to Google Gemini.
+
+```mermaid
+flowchart TB
+    subgraph Browser["Your browser"]
+        UI["Single-page interface<br/>templates/index.html, static/js/app.js<br/>text rendered as DOM nodes, no external scripts"]
+    end
+
+    subgraph Local["DocuMentor on 127.0.0.1:10000 (Flask on Waitress)"]
+        Guard["Local-only guard<br/>Host and Origin checks, strict CSP"]
+        API["JSON API<br/>core/web.py"]
+        Jobs["Background jobs<br/>core/jobs.py, 2 workers"]
+
+        subgraph Features["Features"]
+            Svc["core/services.py<br/>check, create, answer key,<br/>notes review, chat"]
+            Grade["core/grading.py<br/>match answers, suggest marks,<br/>class summary"]
+            Bank["core/bank.py<br/>save, edit, pick,<br/>build assignments"]
+        end
+
+        Docs["core/documents.py<br/>read .docx .pdf .txt .md"]
+        Ret["core/retrieval.py<br/>passages and BM25 search"]
+        AI["core/ai.py<br/>pacing, timeouts, retries,<br/>JSON schemas"]
+        Export["core/export.py<br/>Word and CSV"]
+        Store[("SQLite, core/store.py<br/>documents, jobs, results,<br/>chats, question bank")]
+    end
+
+    Gemini["Google Gemini API"]
+
+    UI -- "fetch /api/..." --> Guard --> API
+    API -- "upload" --> Docs --> Store
+    API -- "start a task" --> Jobs --> Features
+    API -- "decisions, bank picks" --> Features
+    Features --> Ret
+    Features <--> Store
+    Features --> AI -- "passages and answers<br/>as fenced data" --> Gemini
+    API -- "download" --> Export --> Store
+```
+
+### What happens when you grade a class
+
+Every AI task follows the same pattern: the page starts a background job, polls its progress,
+then opens the saved result for review. Grading is the longest of them.
+
+```mermaid
+sequenceDiagram
+    actor T as Teacher
+    participant UI as Browser
+    participant API as Flask API
+    participant J as Job runner
+    participant S as Grading service
+    participant DB as SQLite
+    participant G as Gemini
+
+    T->>UI: Choose a homework and students' files
+    UI->>API: POST /api/jobs/grade_answers
+    API->>J: Queue the job
+    API-->>UI: 202 with a job id
+    J->>S: grade_answers
+    S->>DB: Load the homework and the students' text
+    opt Answer key is missing
+        S->>G: Write the answer key from the textbook
+    end
+    S->>S: Match answers by number, flag requests for marks
+    loop Each student, up to 20 answers per call
+        S->>G: Passages, answer key and answers, fenced as data
+        G-->>S: JSON grades with marks, verdict, feedback, sources
+        S->>S: Cap marks, keep only citations it really sent
+    end
+    S->>DB: Save the grading with every mark pending
+    loop Every 0.7 seconds until done
+        UI->>API: GET /api/jobs/:id
+        API-->>UI: Progress and status message
+    end
+    UI->>API: GET /api/results/:id
+    T->>UI: Confirm or change marks
+    UI->>API: PATCH /api/results/:id
+    API->>DB: Save the decision
+```
 
 ## Quick start
 
