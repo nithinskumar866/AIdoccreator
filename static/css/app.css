@@ -320,10 +320,14 @@ details.help .md { margin-top: 8px; color: var(--ink-2); }
 .bank-body { display: flex; flex-direction: column; gap: 6px; }
 .bank-body ol { margin: 0; padding-left: 22px; }
 .bank-actions { display: flex; gap: 2px; }
-.filters select { width: auto; max-width: 100%; }
-.filters > .grow { flex: 1 1 220px; }
+.filters select { width: auto; max-width: 190px; }
+.filters > .grow { flex: 1 1 180px; }
 .rules { gap: 8px; }
-.rule { display: grid; grid-template-columns: 64px 92px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.rule { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; grid-template-areas: "count diff remove" "topic topic topic"; gap: 6px; align-items: center; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.rule > input { grid-area: count; }
+.rule > select:nth-of-type(1) { grid-area: diff; }
+.rule > select:nth-of-type(2) { grid-area: topic; }
+.rule > button { grid-area: remove; }
 .rule input, .rule select { padding: 6px 7px; font-size: 13px; }
 details.picker-rules { display: flex; flex-direction: column; gap: 8px; }
 details.picker-rules > * + * { margin-top: 8px; }
@@ -348,8 +352,6 @@ details.picker-rules > * + * { margin-top: 8px; }
   .cmp-head { display: none; }
   .cmp-cell[data-label] { flex-wrap: wrap; }
   .cmp-cell[data-label]::before { content: attr(data-label); flex-basis: 100%; font-size: 12px; font-weight: 600; color: var(--ink-3); }
-  .rule { grid-template-columns: 56px 1fr auto; }
-  .rule select:nth-of-type(2) { grid-column: 1 / -1; grid-row: 2; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation-duration: 3s !important; }

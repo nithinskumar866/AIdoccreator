@@ -852,7 +852,7 @@
 
   // ---------- compare versions ----------
   // Word-level difference, so a small edit shows as a small highlight rather than a new paragraph.
-  function diffWords(before, after) {
+  function diffWords(before, after, wholeIfDifferent) {
     const a = before.split(/(\s+)/), b = after.split(/(\s+)/);
     if (a.length * b.length > 160000) return [[before], [after]];
     const rows = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
@@ -874,6 +874,12 @@
     }
     while (i < a.length) push(left, "del", a[i++]);
     while (j < b.length) push(right, "ins", b[j++]);
+    // When most words differ, the shared "of" and "the" are noise: mark the whole text instead.
+    const words = (text) => text.split(/\s+/).filter(Boolean).length;
+    const common = left.filter((p) => p.kind === "same").reduce((n, p) => n + words(p.text), 0);
+    if (wholeIfDifferent && common < 0.5 * Math.max(words(before), words(after), 1)) {
+      return [[h("del", null, before)], [h("ins", null, after)]];
+    }
     // A space between two changed words joins them, so a rewritten phrase reads as one change.
     const merge = (list) => list.reduce((out, part, index) => {
       const prev = out[out.length - 1], next = list[index + 1];
@@ -918,7 +924,7 @@
       }
       let content = [text];
       if ((status === "edited" || status === "replaced") && other !== null) {
-        content = diffWords(side === "before" ? text : other, side === "before" ? other : text)[side === "before" ? 0 : 1];
+        content = diffWords(side === "before" ? text : other, side === "before" ? other : text, status === "replaced")[side === "before" ? 0 : 1];
       }
       return h("div", { class: "cmp-cell" + (side === "after" ? " after" : ""), "data-label": side === "before" ? "Original" : "Now" },
         h("span", { class: "qnum" }, number + "."), h("span", { class: "qtext" }, content));
