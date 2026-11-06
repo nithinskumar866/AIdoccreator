@@ -7,7 +7,7 @@ import re
 from docx import Document
 from docx.shared import Pt
 
-from .services import final_items, final_notes
+from .services import changes, final_items, final_notes
 
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 INLINE = re.compile(r"(\*\*.+?\*\*|__.+?__|\*[^*\s][^*]*?\*|`[^`]+`)")
@@ -124,12 +124,82 @@ def _homework(document, data: dict, answers: bool, tags: bool) -> None:
                 add_markdown(document, "\n".join(rest))
 
 
-def export_docx(result: dict, answers: bool = False, tags: bool = False) -> io.BytesIO:
+CHANGE_LABEL = {"unchanged": "Unchanged", "edited": "Edited", "replaced": "Replaced",
+                "removed": "Removed", "added": "Added"}
+
+
+def _table(document, header: list[str]):
+    table = document.add_table(rows=1, cols=len(header))
+    table.style = "Table Grid"
+    for cell, value in zip(table.rows[0].cells, header):
+        cell.paragraphs[0].add_run(value).bold = True
+    return table
+
+
+def _row(table, values: list) -> None:
+    for cell, value in zip(table.add_row().cells, values):
+        cell.text = _clean("" if value is None else str(value))
+
+
+def _changes(document, data: dict) -> None:
+    report = changes(data)
+    counts = ", ".join(f"{n} {CHANGE_LABEL[s].lower()}" for s, n in report["counts"].items() if n)
+    document.add_paragraph(counts or "No questions.")
+    table = _table(document, ["Original", "Now", "Change", "Why"])
+    for row in report["rows"]:
+        before = f"{row['before_number']}. {row['before']}" if row["before"] is not None else "(new)"
+        after = f"{row['after_number']}. {row['after']}" if row["after"] is not None else "(removed)"
+        _row(table, [before, after, CHANGE_LABEL[row["status"]], row["reason"]])
+
+
+def _grading(document, result: dict) -> None:
+    from .grading import view
+
+    shown = view(result)
+    questions = {q["id"]: q for q in result["data"]["questions"]}
+    stats = shown["stats"]
+    document.add_paragraph(f"{stats['students']} students · class average {stats['average']}%"
+                           + (f" · {stats['pending']} marks still to confirm" if stats["pending"] else ""))
+    document.add_heading("Class summary", level=1)
+    table = _table(document, ["Student", "Score", "%", "To confirm"])
+    for s in shown["summary"]["students"]:
+        _row(table, [s["name"], "Not graded" if s["error"] else f"{s['score']} / {s['max']}",
+                     "" if s["error"] else s["percent"], s["pending"]])
+    document.add_heading("Questions", level=2)
+    table = _table(document, ["Question", "Average", "Below half marks"])
+    for q in shown["summary"]["questions"]:
+        _row(table, [f"{q['number']}. {q['text'].splitlines()[0][:140]}", f"{q['average']}%", q["struggled"]])
+    for student, line in zip(result["data"]["students"], shown["summary"]["students"]):
+        document.add_page_break()
+        document.add_heading(_clean(student["name"]), level=1)
+        if student.get("error"):
+            document.add_paragraph("This student's work couldn't be marked: " + student["error"])
+            continue
+        document.add_paragraph(f"Score: {line['score']} out of {line['max']} ({line['percent']}%)"
+                               + (" · includes marks not yet confirmed" if line["pending"] else ""))
+        table = _table(document, ["Question", "Answer", "Mark", "Feedback"])
+        for entry in student["answers"]:
+            question = questions[entry["question_id"]]
+            mark = entry["mark"] if entry["decision"] == "accepted" else entry["suggested"]
+            mark_text = "–" if mark is None else f"{mark} / {question['marks']}"
+            if entry["decision"] != "accepted" and mark is not None:
+                mark_text += " (suggested)"
+            _row(table, [f"{question['number']}. {question['text'].splitlines()[0][:200]}",
+                         entry["answer"][:1500] or "(no answer)", mark_text, entry["feedback"]])
+
+
+def export_docx(result: dict, answers: bool = False, tags: bool = False, compare: bool = False) -> io.BytesIO:
     document = Document()
     document.styles["Normal"].font.name = "Calibri"
     document.styles["Normal"].font.size = Pt(11)
     data = result["data"]
-    if result["type"] == "notes_correction":
+    if result["type"] == "grading":
+        document.add_heading(_clean(result["title"]), level=0)
+        _grading(document, result)
+    elif compare and "items" in data:
+        document.add_heading("Changes: " + _clean(result["title"]), level=0)
+        _changes(document, data)
+    elif result["type"] == "notes_correction":
         document.add_heading(_clean(data["documents"]["notes"]), level=0)
         add_markdown(document, final_notes(data))
     else:

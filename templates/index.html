@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DocuMentor</title>
-  <meta name="description" content="Check homework, write new assignments and review notes against your textbook.">
+  <meta name="description" content="Check and grade homework, build assignments from a question bank and review notes against your textbook.">
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
   <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
@@ -33,6 +33,10 @@
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.500A8.500 8.500 0 0 1 9.500 4 8.500 8.500 0 1 0 20 14.500Z"/></symbol>
       <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.500"/><path d="M12 3.500v17"/><path d="M12 7c2.500 0 5 2 5 5s-2.500 5-5 5" class="fill-current"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-grade" viewBox="0 0 24 24"><path d="M4 19.500h16"/><path d="m5.500 15.500 3.500-9.500 3.500 9.500"/><path d="M6.800 12.500h4.400"/><path d="M15.500 10h4.500M17.750 7.750v4.500"/></symbol>
+      <symbol id="i-bank" viewBox="0 0 24 24"><rect x="3.500" y="4" width="17" height="4.500" rx="1"/><path d="M5 8.500v10A1.500 1.500 0 0 0 6.500 20h11a1.500 1.500 0 0 0 1.500-1.500v-10"/><path d="M10 12.500h4"/></symbol>
+      <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M7 4h10v16l-5-3.500L7 20V4Z"/></symbol>
+      <symbol id="i-compare" viewBox="0 0 24 24"><rect x="3.500" y="5" width="7" height="14" rx="1.500"/><rect x="13.500" y="5" width="7" height="14" rx="1.500"/></symbol>
       <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.500" r="4"/><path d="m11 12.500 8.500-8.500M16 7.500l3 3"/></symbol>
     </defs>
   </svg>
@@ -51,8 +55,10 @@
         <a href="#/check" data-route="check"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>Check homework</span></a>
         <a href="#/create" data-route="create"><svg class="icon" aria-hidden="true"><use href="#i-spark"/></svg><span>Create homework</span></a>
         <a href="#/notes" data-route="notes"><svg class="icon" aria-hidden="true"><use href="#i-notes"/></svg><span>Review notes</span></a>
+        <a href="#/grade" data-route="grade"><svg class="icon" aria-hidden="true"><use href="#i-grade"/></svg><span>Grade answers</span></a>
         <a href="#/ask" data-route="ask"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg><span>Ask</span></a>
         <p class="nav-label">Saved</p>
+        <a href="#/bank" data-route="bank"><svg class="icon" aria-hidden="true"><use href="#i-bank"/></svg><span>Question bank</span></a>
         <a href="#/history" data-route="history"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span>History</span></a>
       </nav>
       <div class="side-foot">

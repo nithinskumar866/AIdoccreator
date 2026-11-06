@@ -297,14 +297,32 @@ class Services:
         count = params["count"]
         instructions = params.get("instructions", "")
         difficulty = params.get("difficulty", "mixed")
-        kinds = params.get("question_types") or []
-
         progress(5, "Reading your documents")
+        questions, topics, analysis = self.write_questions(
+            textbook, notes, count=count, difficulty=difficulty,
+            kinds=params.get("question_types") or [], instructions=instructions,
+            total_marks=params.get("total_marks"), progress=progress)
+        if not questions:
+            raise ServiceError("The AI didn't produce any questions. Please try again.")
+        progress(90, "Preparing your review")
+        title = f"New homework: {textbook['name']} ({len(questions)} questions)"
+        return {"result_id": self.store.add_result("homework_generated", title, {
+            "items": questions, "topics": topics, "analysis": analysis,
+            "documents": {"textbook": textbook["name"], "notes": notes["name"] if notes else None},
+            "textbook_id": textbook["id"], "notes_id": notes["id"] if notes else None,
+            "requested": {"count": count, "difficulty": difficulty, "instructions": instructions},
+        })}
+
+    def write_questions(self, textbook: dict, notes: Optional[dict], *, count: int, difficulty: str,
+                        kinds: list[str], instructions: str, total_marks: Optional[int],
+                        progress: Progress, avoid: tuple[str, ...] = (), first_id: int = 1,
+                        pct: tuple[int, int] = (20, 85)) -> tuple[list[dict], list[str], dict]:
+        """Write questions from the material. Returns review items, the topics and the analysis."""
         book_chunks = retrieval.chunk_segments(textbook["segments"], "T")
         note_chunks = retrieval.chunk_segments(notes["segments"], "N") if notes else []
         names = {"T": textbook["name"], "N": notes["name"] if notes else ""}
-        progress(10, "Finding the topics covered")
-        topics = self._topics(book_chunks + note_chunks, progress, 10)
+        progress(pct[0] // 2, "Finding the topics covered")
+        topics = self._topics(book_chunks + note_chunks, progress, pct[0] // 2)
         allowed = {t.lower(): t for t in topics}
 
         book_index, note_index = retrieval.Index(book_chunks), retrieval.Index(note_chunks)
@@ -343,8 +361,8 @@ class Services:
         questions: list[dict] = []
         batches = [min(ITEM_BATCH, count - i) for i in range(0, count, ITEM_BATCH)]
         for number, size in enumerate(batches, start=1):
-            pct = 20 + int(65 * (number - 1) / len(batches))
-            progress(pct, f"Writing questions ({number} of {len(batches)} batches)")
+            step = pct[0] + int((pct[1] - pct[0]) * (number - 1) / len(batches))
+            progress(step, f"Writing questions ({number} of {len(batches)} batches)")
             data = Data()
             parts = [
                 data.block("TOPICS", json.dumps(topics)),
@@ -354,22 +372,23 @@ class Services:
             ]
             if kinds:
                 parts.append("Question types to use: " + ", ".join(kinds) + ".")
-            if params.get("total_marks"):
-                parts.append(f"The whole assignment is worth about {params['total_marks']} marks, "
+            if total_marks:
+                parts.append(f"The whole assignment is worth about {total_marks} marks, "
                              f"and this part has {size} of {count} questions.")
             if instructions:
                 parts.append(data.block("TEACHER REQUEST", instructions))
-            if questions:
+            written = list(avoid) + [q["original"] for q in questions]
+            if written:
                 parts.append(data.block("ALREADY WRITTEN (do not repeat)",
-                                        json.dumps([q["original"] for q in questions], ensure_ascii=False)))
-            result = self._json(system, "\n\n".join(parts), schema, progress, pct)
+                                        json.dumps(written[-60:], ensure_ascii=False)))
+            result = self._json(system, "\n\n".join(parts), schema, progress, step)
             for raw in (result.get("questions") or [])[:size]:
                 if not isinstance(raw, dict) or not _clean_text(raw.get("text")):
                     continue
                 topic = allowed.get(_clean_text(raw.get("topic"), 80).lower())
                 options = [_clean_text(o, 400) for o in raw.get("options") or [] if _clean_text(o)]
                 questions.append({
-                    "id": f"q{len(questions) + 1}", "original": strip_number(_clean_text(raw.get("text"))),
+                    "id": f"q{first_id + len(questions)}", "original": strip_number(_clean_text(raw.get("text"))),
                     "type": "question", "flagged": False, "verdict": "keep", "reason": "",
                     "replacement": "", "difficulty": _enum(raw.get("difficulty"), DIFFICULTIES),
                     "marks": _marks(raw.get("marks")), "topics": [topic] if topic else [],
@@ -377,17 +396,7 @@ class Services:
                     "sources": _valid_sources(raw.get("source_ids"), lookup),
                     "answer": _prose(raw.get("answer")), "decision": "accepted", "edited": False,
                 })
-        if not questions:
-            raise ServiceError("The AI didn't produce any questions. Please try again.")
-        progress(90, "Preparing your review")
-        title = f"New homework: {textbook['name']} ({len(questions)} questions)"
-        return {"result_id": self.store.add_result("homework_generated", title, {
-            "items": questions, "topics": topics,
-            "analysis": self._analysis(textbook, book_chunks, {c["id"] for c in book}),
-            "documents": {"textbook": textbook["name"], "notes": notes["name"] if notes else None},
-            "textbook_id": textbook["id"], "notes_id": notes["id"] if notes else None,
-            "requested": {"count": count, "difficulty": difficulty, "instructions": instructions},
-        })}
+        return questions, topics, self._analysis(textbook, book_chunks, {c["id"] for c in book})
 
     # ---------- answer key ----------
     def answer_key(self, params: dict, progress: Progress) -> dict:
@@ -625,6 +634,46 @@ def final_notes(data: dict) -> str:
     return text
 
 
+def _with_options(text: str, options: list[str]) -> str:
+    return "\n".join([text] + [f"{'abcdefgh'[n]}) {o}" for n, o in enumerate(options[:8])])
+
+
+def changes(data: dict) -> dict:
+    """The first version next to the current one, row by row, for the comparison view."""
+    rows, before_n, after_n = [], 0, 0
+    for item in data.get("items", []):
+        if item["type"] == "text" and item.get("verdict") == "keep":
+            continue
+        options = item.get("options") or []
+        if item.get("added"):
+            before = None
+        else:
+            before_n += 1
+            before = _with_options(strip_number(item.get("initial") or item["original"]), options)
+        verdict, decision = item.get("verdict"), item.get("decision")
+        status, reason = "unchanged", ""
+        if verdict == "deleted":
+            after, status, reason = None, "removed", "Deleted by you."
+        elif verdict == "remove" and decision != "rejected":
+            after, status, reason = None, "removed", item.get("reason", "")
+        elif verdict == "replace" and decision == "accepted":
+            after, status, reason = _with_options(item["replacement"], options), "replaced", item.get("reason", "")
+        else:
+            after = _with_options(strip_number(item["original"]), options)
+            if before is None:
+                status, reason = "added", "Written to fill a gap in the question bank."
+            elif after != before:
+                status, reason = "edited", "Edited by you."
+        if after is not None:
+            after_n += 1
+        rows.append({"id": item["id"], "before_number": before_n if before is not None else None,
+                     "after_number": after_n if after is not None else None,
+                     "before": before, "after": after, "status": status, "reason": reason})
+    counts = {s: sum(1 for r in rows if r["status"] == s)
+              for s in ("unchanged", "edited", "replaced", "removed", "added")}
+    return {"rows": rows, "counts": counts}
+
+
 def coverage(data: dict) -> list[dict]:
     rows = {topic: [] for topic in data.get("topics", [])}
     number = 0
@@ -655,6 +704,7 @@ def view(result: dict) -> dict:
             "answers": sum(1 for i in questions if i.get("answer")),
         }
         out["coverage"] = coverage(data)
+        out["changes"] = changes(data)
     else:
         issues = data.get("issues", [])
         out["stats"] = {
@@ -688,6 +738,7 @@ def apply_decision(result: dict, entry_id: str, decision: Optional[str], text: O
             if entry.get("verdict") == "replace":
                 entry["replacement"] = text
             else:
+                entry.setdefault("initial", entry["original"])  # kept for the comparison view
                 entry["original"] = text
             entry["edited"] = True
             entry["flagged"] = False if entry.get("verdict") == "keep" else entry.get("flagged")

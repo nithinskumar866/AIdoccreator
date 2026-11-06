@@ -7,11 +7,11 @@ import re
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
-from flask import Blueprint, Flask, current_app, jsonify, render_template, request, send_file
+from flask import Blueprint, Flask, Response, current_app, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
-from . import documents, services
+from . import bank, documents, grading, services
 from .ai import GeminiClient, UnconfiguredAI
 from .config import BASE_DIR, Settings
 from .export import export_docx
@@ -21,7 +21,7 @@ from .store import Store
 
 log = logging.getLogger("documentor.web")
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
-ROLES = {"textbook", "notes", "homework"}
+ROLES = {"textbook", "notes", "homework", "answers"}
 MUTATING = {"POST", "PATCH", "PUT", "DELETE"}
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
        "connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -59,7 +59,7 @@ def status():
         model=getattr(_services().ai, "model", settings.model),
         max_upload_mb=settings.max_upload_mb,
         counts={"documents": len(store.list_documents()), "results": len(store.list_results()),
-                "chats": len(store.list_chats())},
+                "chats": len(store.list_chats()), "bank": store.bank_count()},
         question_types=services.QUESTION_TYPES,
         max_questions=services.MAX_QUESTIONS,
     )
@@ -127,9 +127,16 @@ def delete_document(doc_id: str):
 
 
 # ---------- jobs ----------
+VALIDATORS = {
+    "grade_answers": grading.validate,
+    "bank_assignment": bank.validate_assignment,
+}
+
+
 @api.post("/jobs/<job_type>")
 def create_job(job_type: str):
-    params = services.validate_job(job_type, _json_body())
+    validator = VALIDATORS.get(job_type)
+    params = validator(_json_body()) if validator else services.validate_job(job_type, _json_body())
     return _submit(job_type, params)
 
 
@@ -151,12 +158,21 @@ def _load_result(result_id: str):
     return _store().get_result(result_id)
 
 
+def _view(result: dict) -> dict:
+    if result["type"] == "grading":
+        return grading.view(result)
+    shown = services.view(result)
+    if result["type"] in bank.HOMEWORK_TYPES:
+        shown["banked"] = bank.saved_item_ids(_store(), result["id"])
+    return shown
+
+
 @api.get("/results/<result_id>")
 def get_result(result_id: str):
     result = _load_result(result_id)
     if not result:
         return jsonify(error="That result no longer exists."), 404
-    return jsonify(services.view(result))
+    return jsonify(_view(result))
 
 
 @api.patch("/results/<result_id>")
@@ -170,13 +186,17 @@ def update_result(result_id: str):
         title = str(body["title"] or "").strip()[:160]
         if not title:
             return jsonify(error="The title can't be empty."), 400
-    if body.get("bulk"):
-        services.bulk_decision(result, body["bulk"])
-    if body.get("entry_id"):
-        services.apply_decision(result, str(body["entry_id"]), body.get("decision"), body.get("text"),
-                                bool(body.get("delete")))
+    if result["type"] == "grading":
+        if body.get("student_id") or body.get("bulk"):
+            grading.apply(result, body)
+    else:
+        if body.get("bulk"):
+            services.bulk_decision(result, body["bulk"])
+        if body.get("entry_id"):
+            services.apply_decision(result, str(body["entry_id"]), body.get("decision"), body.get("text"),
+                                    bool(body.get("delete")))
     _store().save_result(result_id, result["data"], title)
-    return jsonify(services.view(_load_result(result_id)))
+    return jsonify(_view(_load_result(result_id)))
 
 
 @api.delete("/results/<result_id>")
@@ -191,10 +211,66 @@ def export_result(result_id: str):
     result = _load_result(result_id)
     if not result:
         return jsonify(error="That result no longer exists."), 404
-    buffer = export_docx(result, request.args.get("answers") == "1", request.args.get("tags") == "1")
     name = secure_filename(result["title"])[:70] or "documentor"
+    if request.args.get("format") == "csv":
+        if result["type"] != "grading":
+            return jsonify(error="Only gradings can be exported as a spreadsheet."), 400
+        return Response(grading.to_csv(result), mimetype="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{name}.csv"'})
+    compare = request.args.get("compare") == "1"
+    buffer = export_docx(result, request.args.get("answers") == "1", request.args.get("tags") == "1", compare)
+    if compare:
+        name = f"{name}_changes"
     return send_file(buffer, as_attachment=True, download_name=f"{name}.docx",
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+
+@api.post("/results/<result_id>/regrade")
+def regrade(result_id: str):
+    result = _load_result(result_id)
+    if not result or result["type"] != "grading":
+        return jsonify(error="That grading no longer exists."), 404
+    student_id = str(_json_body().get("student_id") or "")
+    if not any(s["id"] == student_id for s in result["data"]["students"]):
+        return jsonify(error="That student is no longer in this grading."), 404
+    return _submit("regrade_student", {"result_id": result_id, "student_id": student_id})
+
+
+# ---------- question bank ----------
+@api.get("/bank")
+def list_bank():
+    return jsonify(bank.listing(_store()))
+
+
+@api.post("/bank")
+def save_to_bank():
+    body = _json_body()
+    result = _load_result(str(body.get("result_id") or ""))
+    if not result:
+        return jsonify(error="That result no longer exists."), 404
+    ids = body.get("item_ids")
+    if ids is not None and (not isinstance(ids, list) or not ids):
+        return jsonify(error="Choose the questions to save."), 400
+    outcome = bank.save_from_result(_store(), result, [str(i) for i in ids] if ids else None)
+    return jsonify(outcome | {"banked": bank.saved_item_ids(_store(), result["id"])})
+
+
+@api.patch("/bank/<question_id>")
+def update_bank_question(question_id: str):
+    question = bank.update(_store(), question_id, _json_body())
+    return jsonify({k: v for k, v in question.items() if k != "fingerprint"})
+
+
+@api.delete("/bank/<question_id>")
+def delete_bank_question(question_id: str):
+    if not _store().delete_bank_question(question_id):
+        return jsonify(error="That question is no longer in the bank."), 404
+    return jsonify(ok=True)
+
+
+@api.post("/bank/pick")
+def pick_from_bank():
+    return jsonify(bank.pick(_store(), _json_body()))
 
 
 # ---------- chats ----------
@@ -269,6 +345,9 @@ def create_app(settings: Settings | None = None, ai=None) -> Flask:
         "correct_notes": service.correct_notes,
         "answer_key": service.answer_key,
         "chat": service.chat,
+        "grade_answers": lambda params, progress: grading.grade_answers(service, params, progress),
+        "regrade_student": lambda params, progress: grading.regrade_student(service, params, progress),
+        "bank_assignment": lambda params, progress: bank.build_assignment(service, params, progress),
     }, settings.job_workers)
     app.register_blueprint(api)
 

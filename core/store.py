@@ -1,4 +1,4 @@
-"""SQLite storage for documents, jobs, results and chats. Only extracted text is kept."""
+"""SQLite storage for documents, jobs, results, chats and the question bank. Only extracted text is kept."""
 from __future__ import annotations
 
 import json
@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL, content TEXT NOT NULL, sources TEXT NOT NULL, created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, created_at);
+CREATE TABLE IF NOT EXISTS bank (
+  id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, data TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
 """
 
 
@@ -196,3 +200,51 @@ class Store:
     def delete_chat(self, chat_id: str) -> bool:
         with self._db() as db:
             return db.execute("DELETE FROM chats WHERE id=?", (chat_id,)).rowcount > 0
+
+    # Question bank
+    def add_bank_question(self, fingerprint: str, data: dict) -> Optional[str]:
+        """Returns the new id, or None when the same question is already saved."""
+        question_id, now = new_id(), time.time()
+        with self._db() as db:
+            added = db.execute("INSERT OR IGNORE INTO bank (id,fingerprint,data,used,created_at,updated_at) "
+                               "VALUES (?,?,?,0,?,?)",
+                               (question_id, fingerprint, json.dumps(data), now, now)).rowcount
+        return question_id if added else None
+
+    def list_bank(self) -> list[dict]:
+        with self._db() as db:
+            rows = db.execute("SELECT * FROM bank ORDER BY created_at DESC, rowid DESC").fetchall()
+        return [self._bank_row(r) for r in rows]
+
+    def get_bank_question(self, question_id: str) -> Optional[dict]:
+        with self._db() as db:
+            row = db.execute("SELECT * FROM bank WHERE id=?", (question_id,)).fetchone()
+        return self._bank_row(row) if row else None
+
+    @staticmethod
+    def _bank_row(row) -> dict:
+        return {**json.loads(row["data"]), "id": row["id"], "used": row["used"],
+                "created_at": row["created_at"], "fingerprint": row["fingerprint"]}
+
+    def update_bank_question(self, question_id: str, fingerprint: str, data: dict) -> bool:
+        """False when another saved question already has this wording."""
+        with self._db() as db:
+            clash = db.execute("SELECT 1 FROM bank WHERE fingerprint=? AND id<>?",
+                               (fingerprint, question_id)).fetchone()
+            if clash:
+                return False
+            db.execute("UPDATE bank SET fingerprint=?, data=?, updated_at=? WHERE id=?",
+                       (fingerprint, json.dumps(data), time.time(), question_id))
+        return True
+
+    def delete_bank_question(self, question_id: str) -> bool:
+        with self._db() as db:
+            return db.execute("DELETE FROM bank WHERE id=?", (question_id,)).rowcount > 0
+
+    def mark_bank_used(self, question_ids: list[str]) -> None:
+        with self._db() as db:
+            db.executemany("UPDATE bank SET used=used+1 WHERE id=?", [(i,) for i in question_ids])
+
+    def bank_count(self) -> int:
+        with self._db() as db:
+            return db.execute("SELECT COUNT(*) FROM bank").fetchone()[0]

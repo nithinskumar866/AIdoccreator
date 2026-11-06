@@ -25,6 +25,13 @@
     return node;
   }
 
+  // replaceChildren, skipping empty values the way h() does, and accepting arrays.
+  function put(node, ...children) {
+    node.replaceChildren(...children.flat(Infinity).filter((c) => c !== undefined && c !== null && c !== false)
+      .map((c) => (c.nodeType ? c : String(c))));
+    return node;
+  }
+
   function icon(name) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "icon");
@@ -105,8 +112,10 @@
     return h("div", { class: "empty" }, icon(iconName), h("p", null, text), action);
   }
 
-  const ROLE_LABEL = { textbook: "Textbook", notes: "Notes", homework: "Homework" };
-  const TYPE_LABEL = { homework_check: "Homework check", homework_generated: "New homework", notes_correction: "Notes review" };
+  const ROLE_LABEL = { textbook: "Textbook", notes: "Notes", homework: "Homework", answers: "Student work" };
+  const TYPE_LABEL = { homework_check: "Homework check", homework_generated: "New homework", homework_bank: "From the bank",
+    notes_correction: "Notes review", grading: "Grading" };
+  const HOMEWORK_TYPES = ["homework_check", "homework_generated", "homework_bank"];
 
   // ---------- safe Markdown (builds DOM nodes, never HTML) ----------
   function inline(text) {
@@ -255,7 +264,7 @@
       if (options.optional) select.append(h("option", { value: "" }, "None"));
       else select.append(h("option", { value: "", disabled: true }, "Choose a document"));
       const matching = state.documents.filter((d) => d.role === role);
-      const others = state.documents.filter((d) => d.role !== role);
+      const others = state.documents.filter((d) => d.role !== role && d.role !== "answers");
       const add = (d) => h("option", { value: d.id }, d.name);
       if (matching.length) select.append(h("optgroup", { label: ROLE_LABEL[role] }, matching.map(add)));
       if (others.length) select.append(h("optgroup", { label: "Other documents" }, others.map(add)));
@@ -340,8 +349,10 @@
     node.append(h("section", { class: "grid two" },
       tool("#/check", "check", "Check homework", "Find off-topic questions and approve each replacement."),
       tool("#/create", "spark", "Create homework", "Write a new assignment with marks, difficulty and an answer key."),
-      tool("#/notes", "notes", "Review notes", "Separate real mistakes from content the textbook simply doesn't cover."),
-      tool("#/ask", "chat", "Ask your documents", "Chat with follow-up questions and answers that cite their source.")));
+      tool("#/grade", "grade", "Grade answers", "Mark students' work with suggested marks and feedback you approve."),
+      tool("#/bank", "bank", "Question bank", "Keep your best questions and build new assignments from them."),
+      tool("#/ask", "chat", "Ask your documents", "Chat with follow-up questions and answers that cite their source."),
+      tool("#/notes", "notes", "Review notes", "Separate real mistakes from content the textbook simply doesn't cover.")));
     if (!docs.length) {
       node.append(h("section", { class: "card" }, h("h2", null, "Getting started"),
         h("ol", { class: "steps" },
@@ -508,7 +519,8 @@
     const search = h("input", { type: "search", placeholder: "Search by title", "aria-label": "Search history", oninput: render });
     let filter = "all";
     const seg = h("div", { class: "seg", role: "group", "aria-label": "Filter by type" },
-      [["all", "All"], ["homework_check", "Checks"], ["homework_generated", "New homework"], ["notes_correction", "Notes"]].map(([value, label]) =>
+      [["all", "All"], ["homework_check", "Checks"], ["homework_generated", "New homework"], ["homework_bank", "From the bank"],
+        ["grading", "Gradings"], ["notes_correction", "Notes"]].map(([value, label]) =>
         h("button", { type: "button", "aria-pressed": String(value === "all"), onclick: (e) => {
           filter = value;
           seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", "false"));
@@ -608,13 +620,16 @@
       isHomework && h("div", { class: "checks" },
         h("label", { class: "check-chip" }, answers, "Answer key"),
         h("label", { class: "check-chip" }, tags, "Marks and difficulty")),
-      link);
+      h("div", { class: "row" }, link,
+        isHomework && h("a", { class: "btn", download: "", href: "/api/results/" + result.id + "/export?compare=1" }, icon("compare"), "Changes report")));
   }
 
   async function resultPage(id) {
-    const node = h("div", { class: "page" });
     let result = await api("/results/" + id);
+    if (result.type === "grading") return gradingPage(result);
+    const node = h("div", { class: "page" });
     let filter = "all";
+    let mode = "review";
     const body = h("div", { class: "grid" });
     const aside = h("div", { class: "grid sticky" });
     const summary = h("div");
@@ -663,6 +678,9 @@
       if (item.decision === "accepted" && item.verdict !== "keep") chips.push(h("span", { class: "chip good" }, icon("yes"), "Accepted"));
       if (item.decision === "rejected") chips.push(h("span", { class: "chip" }, "Original kept"));
       if (item.edited) chips.push(h("span", { class: "chip info" }, "Edited"));
+      if (item.added) chips.push(h("span", { class: "chip info" }, "New"));
+      const banked = (result.banked || []).includes(item.id);
+      if (banked) chips.push(h("span", { class: "chip good" }, icon("bookmark"), "In bank"));
       if (item.difficulty) chips.push(h("span", { class: "chip" }, item.difficulty));
       if (item.marks) chips.push(h("span", { class: "chip" }, plural(item.marks, "mark")));
       for (const topic of item.topics || []) chips.push(h("span", { class: "chip info" }, topic));
@@ -685,9 +703,25 @@
           item.verdict !== "keep" ? decisionButtons(item, acceptLabel, "Keep original") : null,
           h("button", { class: "btn ghost small", type: "button", onclick: () => editDialog("Edit question", item.verdict === "replace" ? item.replacement : item.original,
             (text) => patch({ entry_id: item.id, text })) }, icon("edit"), "Edit"),
+          inFinal(item) && !banked && h("button", { class: "btn ghost small", type: "button", onclick: () => saveToBank([item.id]) }, icon("bookmark"), "Save to bank"),
           h("button", { class: "btn ghost small", type: "button", onclick: async () => {
             if (await confirmDialog("Delete this question?", "It will be left out of the export.", "Delete")) patch({ entry_id: item.id, delete: true });
           } }, icon("trash"), "Delete")));
+    }
+
+    function inFinal(item) {
+      if (item.type !== "question" || item.decision === "pending") return false;
+      return !(item.verdict === "remove" && item.decision !== "rejected");
+    }
+
+    async function saveToBank(itemIds) {
+      try {
+        const out = await api("/bank", { method: "POST", json: { result_id: id, item_ids: itemIds } });
+        result.banked = out.banked;
+        toast(out.added ? "Saved " + plural(out.added, "question") + " to the bank" + (out.duplicates ? " (" + out.duplicates + " already there)" : "")
+          : "Already in the bank");
+        render();
+      } catch (error) { failed(error); }
     }
 
     function renderHomework() {
@@ -723,7 +757,18 @@
       } }, icon("spark"), s.answers ? "Rewrite answer key" : "Write answer key");
       const tools = h("section", { class: "card" }, h("h2", null, "Answer key"),
         h("p", { class: "muted small-text" }, s.answers + " of " + s.final_questions + " questions answered"), answerButton);
-      aside.replaceChildren(exportControls(result), tools, coverageChart(result.coverage) || "");
+      const saveable = items.filter(inFinal);
+      const unsaved = saveable.filter((i) => !(result.banked || []).includes(i.id)).length;
+      const bankCard = h("section", { class: "card" }, h("h2", null, "Question bank"),
+        h("p", { class: "muted small-text" }, (saveable.length - unsaved) + " of " + plural(saveable.length, "final question") + " saved" +
+          (s.pending ? ". Decide the pending changes to save those too." : ".")),
+        h("div", { class: "row" },
+          h("button", { class: "btn", type: "button", disabled: !unsaved, onclick: () => saveToBank(null) }, icon("bookmark"), unsaved ? "Save all " + unsaved : "All saved"),
+          h("a", { class: "btn ghost small", href: "#/bank" }, "Open bank")));
+      const gradeCard = h("section", { class: "card" }, h("h2", null, "Grade student answers"),
+        h("p", { class: "muted small-text" }, "Upload students' numbered answers to this homework and approve each suggested mark."),
+        h("a", { class: "btn", href: "#/grade/" + id }, icon("grade"), "Grade answers"));
+      aside.replaceChildren(exportControls(result), tools, bankCard, gradeCard, coverageChart(result.coverage) || "");
     }
 
     function issueCard(issue) {
@@ -775,19 +820,586 @@
       h("button", { class: "btn small", type: "button", onclick: () => patch({ bulk: "accepted" }) }, "Accept all"),
       h("button", { class: "btn small", type: "button", onclick: () => patch({ bulk: "rejected" }) }, "Reject all"));
 
+    const reviewArea = h("div", { class: "split" },
+      h("div", { class: "grid" }, h("div", { class: "row" }, h("div", { class: "grow" }, seg), bulk), body),
+      aside);
+    const compareArea = h("div", { hidden: true });
+
     function render() {
       bulk.hidden = !result.stats.pending;
+      reviewArea.hidden = mode !== "review";
+      compareArea.hidden = mode !== "compare";
       if (isHomework) renderHomework(); else renderNotes();
+      if (mode === "compare") compareArea.replaceChildren(compareView(result));
     }
+
+    const modeSeg = isHomework && h("div", { class: "seg", role: "group", "aria-label": "View" },
+      [["review", "Review", "check"], ["compare", "Compare versions", "compare"]].map(([value, label, iconName]) =>
+        h("button", { type: "button", "aria-pressed": String(value === mode), onclick: (e) => {
+          mode = value;
+          modeSeg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", "false"));
+          e.currentTarget.setAttribute("aria-pressed", "true");
+          render();
+        } }, icon(iconName), label)));
 
     node.append(
       h("header", { class: "page-head" }, h("div", null,
-        h("span", { class: "chip info" }, TYPE_LABEL[result.type]), title, analysisLine(result.data))),
-      summary,
-      h("div", { class: "split" },
-        h("div", { class: "grid" }, h("div", { class: "row" }, h("div", { class: "grow" }, seg), bulk), body),
-        aside));
+        h("span", { class: "chip info" }, TYPE_LABEL[result.type]), title, analysisLine(result.data)), modeSeg || null),
+      summary, reviewArea, compareArea);
     render();
+    return node;
+  }
+
+  // ---------- compare versions ----------
+  // Word-level difference, so a small edit shows as a small highlight rather than a new paragraph.
+  function diffWords(before, after) {
+    const a = before.split(/(\s+)/), b = after.split(/(\s+)/);
+    if (a.length * b.length > 160000) return [[before], [after]];
+    const rows = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+    for (let i = a.length - 1; i >= 0; i -= 1) {
+      for (let j = b.length - 1; j >= 0; j -= 1) {
+        rows[i][j] = a[i] === b[j] ? rows[i + 1][j + 1] + 1 : Math.max(rows[i + 1][j], rows[i][j + 1]);
+      }
+    }
+    const left = [], right = [];
+    const push = (list, kind, text) => {
+      const last = list[list.length - 1];
+      if (last && last.kind === kind) last.text += text; else list.push({ kind, text });
+    };
+    let i = 0, j = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) { push(left, "same", a[i]); push(right, "same", b[j]); i += 1; j += 1; }
+      else if (rows[i + 1][j] >= rows[i][j + 1]) push(left, "del", a[i++]);
+      else push(right, "ins", b[j++]);
+    }
+    while (i < a.length) push(left, "del", a[i++]);
+    while (j < b.length) push(right, "ins", b[j++]);
+    // A space between two changed words joins them, so a rewritten phrase reads as one change.
+    const merge = (list) => list.reduce((out, part, index) => {
+      const prev = out[out.length - 1], next = list[index + 1];
+      if (part.kind === "same" && !part.text.trim() && prev && next && prev.kind !== "same" && prev.kind === next.kind) {
+        prev.text += part.text;
+      } else if (prev && prev.kind === part.kind) {
+        prev.text += part.text;
+      } else {
+        out.push({ ...part });
+      }
+      return out;
+    }, []);
+    const nodes = (list) => merge(list).flatMap((part) => {
+      if (part.kind === "same" || !part.text.trim()) return [part.text];
+      const [, lead, core, trail] = part.text.match(/^(\s*)([\s\S]*?)(\s*)$/);
+      return [lead, h(part.kind, null, core), trail].filter((x) => x !== "");
+    });
+    return [nodes(left), nodes(right)];
+  }
+
+  const CHANGE = {
+    unchanged: ["", "Unchanged"], edited: ["info", "Edited"], replaced: ["warn", "Replaced"],
+    removed: ["bad", "Removed"], added: ["good", "Added"],
+  };
+
+  function compareView(result) {
+    const report = result.changes;
+    let onlyChanged = report.rows.some((r) => r.status !== "unchanged");
+    const list = h("div", { class: "cmp-list" });
+    const seg = h("div", { class: "seg", role: "group", "aria-label": "Rows to show" },
+      [[true, "Changes only"], [false, "Everything"]].map(([value, label]) =>
+        h("button", { type: "button", "aria-pressed": String(value === onlyChanged), onclick: (e) => {
+          onlyChanged = value;
+          seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", "false"));
+          e.currentTarget.setAttribute("aria-pressed", "true");
+          paint();
+        } }, label)));
+
+    function cell(number, text, other, side, status) {
+      if (text === null) {
+        return h("div", { class: "cmp-cell empty-cell" }, side === "before" ? "Not in the original" : "Left out of the final version");
+      }
+      let content = [text];
+      if ((status === "edited" || status === "replaced") && other !== null) {
+        content = diffWords(side === "before" ? text : other, side === "before" ? other : text)[side === "before" ? 0 : 1];
+      }
+      return h("div", { class: "cmp-cell" + (side === "after" ? " after" : ""), "data-label": side === "before" ? "Original" : "Now" },
+        h("span", { class: "qnum" }, number + "."), h("span", { class: "qtext" }, content));
+    }
+
+    function paint() {
+      const rows = report.rows.filter((r) => !onlyChanged || r.status !== "unchanged");
+      list.replaceChildren(...(rows.length ? rows.map((r) => {
+        const [tone, label] = CHANGE[r.status];
+        return h("article", { class: "cmp-row " + r.status, "aria-label": label + (r.after_number ? ", question " + r.after_number : "") },
+          cell(r.before_number, r.before, r.after, "before", r.status),
+          cell(r.after_number, r.after, r.before, "after", r.status),
+          h("div", { class: "cmp-meta" }, h("span", { class: "chip " + tone }, label), r.reason && h("span", { class: "reason" }, r.reason)));
+      }) : [h("div", { class: "card" }, empty("yes", "Nothing has changed yet. Accept a suggestion or edit a question to see it here."))]));
+    }
+    paint();
+    const counts = Object.entries(report.counts).filter(([, n]) => n)
+      .map(([status, n]) => h("span", { class: "chip " + CHANGE[status][0] }, n + " " + CHANGE[status][1].toLowerCase()));
+    return h("section", { class: "grid" },
+      h("div", { class: "row" }, h("div", { class: "chips grow" }, counts), seg,
+        h("a", { class: "btn small", download: "", href: "/api/results/" + result.id + "/export?compare=1" }, icon("download"), "Export to Word")),
+      h("div", { class: "cmp-head", "aria-hidden": "true" }, h("span", null, "Original"), h("span", null, "Now")),
+      list);
+  }
+
+  // ---------- grading ----------
+  async function gradePage(homeworkId) {
+    const [, { results }] = await Promise.all([loadDocuments(), api("/results")]);
+    const node = page("Grade answers", "Upload each student's answers, numbered like the homework. You get a suggested mark and feedback for every answer, and you approve each one.", null, true);
+    const homeworks = results.filter((r) => HOMEWORK_TYPES.includes(r.type));
+    if (!homeworks.length) {
+      node.append(h("div", { class: "card" }, empty("grade", "Create or check a homework first. Grading compares students' answers with its questions and answer key.",
+        h("div", { class: "row" }, h("a", { class: "btn primary", href: "#/create" }, "Create homework"), h("a", { class: "btn", href: "#/check" }, "Check homework")))));
+      return node;
+    }
+    const select = h("select", { name: "result_id" }, homeworks.map((r) => h("option", { value: r.id }, r.title + " · " + when(r.created_at))));
+    if (homeworkId && homeworks.some((r) => r.id === homeworkId)) select.value = homeworkId;
+    const chosen = new Set();
+    const listBox = h("div", { class: "checks student-list" });
+
+    function paintStudents() {
+      const work = state.documents.filter((d) => d.role === "answers");
+      listBox.replaceChildren(...(work.length ? work.map((d) => h("label", { class: "check-chip" },
+        h("input", { type: "checkbox", value: d.id, checked: chosen.has(d.id),
+          onchange: (e) => { if (e.currentTarget.checked) chosen.add(d.id); else chosen.delete(d.id); count.textContent = plural(chosen.size, "student") + " chosen"; } }),
+        d.name)) : [h("p", { class: "muted small-text" }, "No student work yet. Upload one file per student.")]));
+      count.textContent = plural(chosen.size, "student") + " chosen";
+    }
+
+    async function add(files) {
+      if (!files.length) return;
+      reading.hidden = false;
+      try {
+        const added = await uploadFiles(files, "answers");
+        for (const d of added) chosen.add(d.id);
+        await loadDocuments();
+        paintStudents();
+      } catch (error) { failed(error); }
+      reading.hidden = true;
+    }
+
+    const count = h("span", { class: "muted small-text" });
+    const reading = h("div", { class: "typing", hidden: true }, h("span", { class: "spinner" }), "Reading the files…");
+    const drop = h("button", { class: "drop compact", type: "button",
+      onclick: async () => add(await chooseFiles(true)),
+      ondragover: (e) => { e.preventDefault(); drop.classList.add("over"); },
+      ondragleave: () => drop.classList.remove("over"),
+      ondrop: (e) => { e.preventDefault(); drop.classList.remove("over"); add([...e.dataTransfer.files]); } },
+      icon("upload"), h("strong", null, "Add students' files"), h("span", { class: "muted small-text" }, "One .docx, .pdf, .txt or .md file per student. Drop several at once."));
+    paintStudents();
+
+    const params = (form) => {
+      if (!chosen.size) throw new Error("Choose at least one student's work.");
+      return { result_id: formValue(form, "result_id"), student_ids: [...chosen] };
+    };
+    node.append(keyBanner() || "", ...toolForm([
+      h("label", { class: "field" }, "Homework", select, h("span", { class: "hint" }, "Missing answers in its answer key are written first, from the textbook.")),
+      h("fieldset", null, h("legend", null, "Students' work"), drop, reading, listBox, count),
+      h("details", { class: "help" }, h("summary", null, "How should students lay out their answers?"),
+        h("div", { class: "md" },
+          h("p", null, "Number each answer like the homework: ", h("code", null, "1."), ", ", h("code", null, "2)"), ", ", h("code", null, "Q3"), " or ", h("code", null, "Answer 4:"), ". Copying the question first is fine."),
+          h("p", null, "A line such as ", h("code", null, "Name: Asha Rao"), " sets the student's name. Otherwise the file name is used."),
+          h("p", null, "If an answer lands under the wrong number, you can move it when you review."))),
+    ], "Grade answers", params, "grade_answers"));
+    return node;
+  }
+
+  function scoreChart(questions) {
+    if (!questions.length) return null;
+    const tip = h("div", { class: "tooltip", hidden: true, role: "tooltip" });
+    const describe = (q) => "Average " + q.average + "% · " + plural(q.struggled, "student") + " below half marks";
+    const showTip = (q) => (e) => {
+      tip.textContent = "Q" + q.number + ": " + describe(q);
+      tip.hidden = false;
+      const box = e.currentTarget.getBoundingClientRect();
+      tip.style.left = Math.min(box.left, innerWidth - 280) + "px";
+      tip.style.top = Math.max(8, box.top - 40) + "px";
+    };
+    const hardest = [...questions].sort((x, y) => x.average - y.average)[0];
+    const chart = h("div", { class: "coverage" }, questions.map((q) => {
+      const bar = h("span", { class: "cov-bar" });
+      bar.style.width = Math.max(q.average, 0) + "%";
+      return h("div", { class: "cov-row", tabIndex: 0, "aria-label": "Question " + q.number + ": " + describe(q),
+        onmouseenter: showTip(q), onfocus: showTip(q),
+        onmouseleave: () => { tip.hidden = true; }, onblur: () => { tip.hidden = true; } },
+        h("div", { class: "cov-head" }, h("span", null, "Q" + q.number + " · " + q.text.split("\n")[0]), h("b", null, q.average + "%")),
+        h("div", { class: "cov-track" }, q.average ? bar : h("span", { class: "cov-none" }, icon("warn"), "No marks")));
+    }));
+    return h("section", { class: "card" }, h("h2", null, "Average score per question"),
+      h("p", { class: "muted small-text" }, "Lowest: Q" + hardest.number + " at " + hardest.average + "%. Suggested marks count until you confirm them."),
+      chart, tip,
+      h("details", null, h("summary", null, "View as table"),
+        h("table", { class: "data" },
+          h("thead", null, h("tr", null, h("th", null, "Question"), h("th", { class: "num" }, "Average"), h("th", { class: "num" }, "Below half"))),
+          h("tbody", null, questions.map((q) => h("tr", null, h("td", null, "Q" + q.number + " " + q.text.split("\n")[0]),
+            h("td", { class: "num" }, q.average + "%"), h("td", { class: "num" }, String(q.struggled))))))));
+  }
+
+  function gradingPage(initial) {
+    let result = initial;
+    const id = result.id;
+    let selected = "class";
+    const node = h("div", { class: "page" });
+    const summary = h("div");
+    const side = h("nav", { class: "chat-list", "aria-label": "Students" });
+    const pane = h("div", { class: "grid" });
+    const title = h("input", { class: "title-input", type: "text", value: result.title, "aria-label": "Title", maxLength: 160,
+      onchange: async () => {
+        try { await api("/results/" + id, { method: "PATCH", json: { title: title.value } }); }
+        catch (error) { failed(error); title.value = result.title; }
+      } });
+
+    async function patch(payload) {
+      try {
+        result = await api("/results/" + id, { method: "PATCH", json: payload });
+        render();
+        return true;
+      } catch (error) { failed(error); return false; }
+    }
+
+    function textDialog(heading, current, label, onSave) {
+      const area = h("textarea", { rows: 6, value: current, "aria-label": heading });
+      dialog.replaceChildren(h("div", { class: "dialog-body" }, h("h2", null, heading), label && h("p", { class: "muted small-text" }, label), area,
+        h("div", { class: "dialog-actions" },
+          h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
+          h("button", { class: "btn primary", type: "button", onclick: () => { dialog.close(); onSave(area.value); } }, "Save"))));
+      dialog.showModal();
+      area.focus();
+    }
+
+    async function regrade(student, button) {
+      const panel = progressPanel();
+      button.replaceWith(panel.node);
+      try {
+        await runJob("regrade", { student_id: student.id }, panel.update, "/results/" + id + "/regrade");
+        result = await api("/results/" + id);
+        toast("Marked " + student.name);
+      } catch (error) { failed(error); }
+      render();
+    }
+
+    const questions = () => Object.fromEntries(result.data.questions.map((q) => [q.id, q]));
+    const lineFor = (sid) => result.summary.students.find((s) => s.id === sid);
+
+    function answerCard(student, entry, question) {
+      const pending = entry.decision === "pending";
+      const chips = [];
+      const tone = { correct: ["good", "Correct"], partial: ["warn", "Partly correct"], incorrect: ["bad", "Incorrect"] }[entry.verdict];
+      if (entry.flagged) chips.push(h("span", { class: "chip bad" }, icon("warn"), "Asks for marks or gives instructions"));
+      if (tone && entry.graded) chips.push(h("span", { class: "chip " + tone[0] }, tone[1]));
+      if (!entry.graded) chips.push(h("span", { class: "chip warn" }, "Not marked yet"));
+      if (pending) chips.push(h("span", { class: "chip" }, "Needs your decision"));
+      else chips.push(h("span", { class: "chip good" }, icon("yes"), entry.overridden ? "Your mark" : "Confirmed"));
+      if (entry.edited) chips.push(h("span", { class: "chip info" }, "Answer edited"));
+
+      const value = entry.decision === "accepted" ? entry.mark : entry.suggested;
+      const input = h("input", { type: "number", class: "mark-input", min: 0, max: question.marks, step: 0.5,
+        value: value === null ? "" : value, "aria-label": "Mark for question " + question.number });
+      const save = () => {
+        if (input.value === "") return toast("Enter a mark first.", "bad");
+        patch({ student_id: student.id, question_id: question.id, mark: Number(input.value) });
+      };
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } });
+      return h("article", { class: "card item" + (entry.flagged && pending ? " flagged" : pending ? " pending" : ""), "aria-label": "Answer " + question.number },
+        h("div", { class: "item-top" }, h("span", { class: "qnum" }, "Q" + question.number), h("div", { class: "chips grow" }, chips)),
+        h("p", { class: "qtext muted" }, question.text),
+        h("div", { class: "answer-box" }, h("span", { class: "tag" }, "Student's answer"),
+          h("span", { class: "qtext" }, entry.answer || "No answer found under this number.")),
+        entry.feedback && h("p", { class: "reason" }, entry.feedback),
+        question.answer && h("details", null, h("summary", null, "Answer key"), h("div", { class: "source" }, markdown(question.answer))),
+        sourcesBlock(entry.sources),
+        h("div", { class: "actions mark-actions" },
+          h("label", { class: "mark-field" }, input, h("span", null, "/ " + question.marks)),
+          h("button", { class: "btn small primary", type: "button", onclick: save }, icon("yes"), pending ? "Confirm mark" : "Update mark"),
+          !pending && h("button", { class: "btn ghost small", type: "button", onclick: () => patch({ student_id: student.id, question_id: question.id, decision: "pending" }) }, "Undo"),
+          h("button", { class: "btn ghost small", type: "button", onclick: () => textDialog("Edit feedback", entry.feedback, null,
+            (text) => patch({ student_id: student.id, question_id: question.id, feedback: text })) }, icon("edit"), "Feedback"),
+          h("button", { class: "btn ghost small", type: "button", onclick: () => textDialog("Fix the student's answer", entry.answer,
+            "Use this when an answer was matched to the wrong number. The answer will need marking again.",
+            (text) => patch({ student_id: student.id, question_id: question.id, answer: text })) }, icon("edit"), "Fix answer")));
+    }
+
+    function studentPane(student) {
+      const line = lineFor(student.id);
+      const qs = questions();
+      const parts = [];
+      const unmarked = student.answers.filter((a) => !a.graded && a.decision === "pending").length;
+      parts.push(h("div", { class: "card student-head" },
+        h("div", { class: "row" },
+          h("div", { class: "grow" }, h("h2", null, student.name), h("p", { class: "muted small-text" }, student.document)),
+          h("button", { class: "btn ghost small", type: "button", onclick: () => textDialog("Rename student", student.name, null, (text) => patch({ student_id: student.id, name: text })) }, icon("edit"), "Rename"),
+          h("button", { class: "btn ghost small icon-only", type: "button", title: "Remove student", "aria-label": "Remove " + student.name, onclick: async () => {
+            if (!(await confirmDialog("Remove this student?", student.name + " will be removed from this grading. Their file stays in your library.", "Remove"))) return;
+            selected = "class";
+            patch({ student_id: student.id, delete: true });
+          } }, icon("trash"))),
+        student.error ? null : tiles([[line.score + " / " + line.max, "score"], [line.percent + "%", "percent"], [line.pending, "to confirm"]]),
+        h("div", { class: "row" },
+          line.pending ? h("button", { class: "btn small", type: "button", onclick: () => patch({ bulk: "accepted", student_id: student.id }) }, icon("yes"), "Confirm all suggested marks") : null,
+          line.flagged ? h("span", { class: "muted small-text" }, plural(line.flagged, "flagged answer") + " must be confirmed one by one.") : null)));
+      if (student.error || unmarked) {
+        const button = h("button", { class: "btn small", type: "button", onclick: (e) => regrade(student, e.currentTarget) }, icon("spark"), student.error ? "Try again" : "Mark " + plural(unmarked, "answer"));
+        parts.push(h("div", { class: "banner" + (student.error ? " bad" : ""), role: student.error ? "alert" : null }, icon("warn"),
+          h("div", { class: "grow" }, student.error ? "This student's work couldn't be marked: " + student.error : plural(unmarked, "answer") + " still need marking."), button));
+      }
+      if (!student.numbered) {
+        parts.push(h("div", { class: "banner" }, icon("warn"), h("div", null, "No numbered answers were found in this file, so every answer is empty. Check the file, or use Fix answer on each question.")));
+      }
+      if (student.unmatched) {
+        parts.push(h("details", { class: "card" }, h("summary", null, "Text not matched to a question"), h("div", { class: "preview-box" }, student.unmatched)));
+      }
+      for (const entry of student.answers) parts.push(answerCard(student, entry, qs[entry.question_id]));
+      return parts;
+    }
+
+    function classPane() {
+      const rows = result.summary.students;
+      return [
+        h("section", { class: "card" }, h("h2", null, "Students"),
+          h("table", { class: "data students" },
+            h("thead", null, h("tr", null, h("th", null, "Student"), h("th", { class: "num" }, "Score"), h("th", { class: "num" }, "%"), h("th", { class: "num" }, "To confirm"))),
+            h("tbody", null, rows.map((s) => h("tr", null,
+              h("td", null, h("button", { class: "link-button", type: "button", onclick: () => { selected = s.id; render(); } }, s.name),
+                s.flagged ? h("span", { class: "chip bad" }, icon("warn"), plural(s.flagged, "flag")) : null),
+              h("td", { class: "num" }, s.error ? "Not marked" : s.score + " / " + s.max),
+              h("td", { class: "num" }, s.error ? "–" : String(s.percent)),
+              h("td", { class: "num" }, String(s.pending))))))),
+        scoreChart(result.summary.questions) || "",
+      ];
+    }
+
+    function exportCard() {
+      const s = result.stats;
+      return h("section", { class: "card" }, h("h2", null, "Export"),
+        s.pending ? h("p", { class: "muted small-text" }, plural(s.pending, "mark") + " still to confirm. The Word report labels them as suggested; the spreadsheet leaves them blank.") : null,
+        h("div", { class: "row" },
+          h("a", { class: "btn primary", download: "", href: "/api/results/" + id + "/export" }, icon("download"), "Word report"),
+          h("a", { class: "btn", download: "", href: "/api/results/" + id + "/export?format=csv" }, icon("download"), "Spreadsheet (CSV)")));
+    }
+
+    function render() {
+      const s = result.stats;
+      summary.replaceChildren(tiles([[s.students, "students"], [s.average + "%", "class average"], [s.pending, "marks to confirm"], [s.flagged, "flagged answers"]]));
+      if (selected !== "class" && !result.data.students.some((st) => st.id === selected)) selected = "class";
+      put(side,
+        h("a", { href: "#", "aria-current": String(selected === "class"), onclick: (e) => { e.preventDefault(); selected = "class"; render(); } }, "Whole class"),
+        result.summary.students.map((st) => h("a", { href: "#", "aria-current": String(selected === st.id), class: "student-link",
+          onclick: (e) => { e.preventDefault(); selected = st.id; render(); window.scrollTo(0, 0); } },
+          h("span", { class: "grow" }, st.name),
+          h("span", { class: "chip" + (st.error ? " bad" : st.pending ? "" : " good") }, st.error ? "Failed" : st.pending ? st.pending + " left" : st.percent + "%"))));
+      const student = result.data.students.find((st) => st.id === selected);
+      put(pane, student ? studentPane(student) : classPane());
+    }
+
+    const bulkAll = h("button", { class: "btn small", type: "button", onclick: () => patch({ bulk: "accepted" }) }, icon("yes"), "Confirm all suggested marks");
+    node.append(
+      h("header", { class: "page-head" }, h("div", null,
+        h("span", { class: "chip info" }, "Grading"), title,
+        h("p", { class: "muted small-text" }, "Against ", h("a", { href: "#/result/" + result.data.homework_result_id }, result.data.homework_title)))),
+      summary,
+      result.stats.default_marks ? h("div", { class: "banner info" }, icon("warn"), h("div", null, "This homework has no marks set, so each question is worth 1 mark. Set marks on the homework and grade again to change this.")) : "",
+      h("div", { class: "grade-layout" },
+        h("div", { class: "grid sticky" }, h("div", { class: "card" }, side), h("div", { class: "card" }, bulkAll), exportCard()),
+        pane));
+    render();
+    return node;
+  }
+
+  // ---------- question bank ----------
+  async function bankPage() {
+    const [listing] = await Promise.all([api("/bank"), loadDocuments()]);
+    let questions = listing.questions;
+    const node = page("Question bank", "Questions you chose to keep. Filter and tick them, or let the bank pick by topic and difficulty, then turn them into a new assignment.");
+    if (!questions.length) {
+      node.append(h("div", { class: "card" }, empty("bank", "Your bank is empty. Open any homework in History and choose Save to bank on the questions you like.",
+        h("a", { class: "btn primary", href: "#/history" }, "Go to History"))));
+      return node;
+    }
+    const chosen = new Set();
+    const filters = { term: "", topic: "", difficulty: "" };
+    const listCard = h("section", { class: "card" });
+    const topicNames = () => [...new Set(questions.map((q) => q.topic).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const search = h("input", { type: "search", placeholder: "Search questions", "aria-label": "Search questions", oninput: () => { filters.term = search.value.trim().toLowerCase(); paint(); } });
+    const topicSelect = h("select", { "aria-label": "Topic", onchange: () => { filters.topic = topicSelect.value; paint(); } });
+    const diffSelect = h("select", { "aria-label": "Difficulty", onchange: () => { filters.difficulty = diffSelect.value; paint(); } },
+      h("option", { value: "" }, "Any difficulty"), listing.difficulties.map((d) => h("option", { value: d }, d[0].toUpperCase() + d.slice(1))));
+
+    function fillTopics() {
+      const current = topicSelect.value;
+      put(topicSelect, h("option", { value: "" }, "All topics"), topicNames().map((t) => h("option", { value: t }, t)));
+      topicSelect.value = topicNames().includes(current) ? current : "";
+    }
+
+    function visible() {
+      return questions.filter((q) => (!filters.topic || q.topic === filters.topic) && (!filters.difficulty || q.difficulty === filters.difficulty) &&
+        (!filters.term || (q.text + " " + q.topic + " " + q.answer).toLowerCase().includes(filters.term)));
+    }
+
+    function editQuestion(q) {
+      const text = h("textarea", { rows: 4, value: q.text, "aria-label": "Question" });
+      const topic = h("input", { type: "text", value: q.topic, maxLength: 80, list: "bank-topics" });
+      const diff = h("select", null, h("option", { value: "" }, "Not set"), listing.difficulties.map((d) => h("option", { value: d }, d)));
+      diff.value = q.difficulty;
+      const marks = h("input", { type: "number", min: 1, max: 100, value: q.marks || "" });
+      const answer = h("textarea", { rows: 4, value: q.answer, "aria-label": "Answer" });
+      const options = h("datalist", { id: "bank-topics" }, topicNames().map((t) => h("option", { value: t })));
+      dialog.replaceChildren(h("div", { class: "dialog-body" }, h("h2", null, "Edit question"),
+        h("label", { class: "field" }, "Question", text),
+        h("div", { class: "grid three" }, h("label", { class: "field" }, "Topic", topic, options), h("label", { class: "field" }, "Difficulty", diff), h("label", { class: "field" }, "Marks", marks)),
+        h("label", { class: "field" }, "Answer", answer),
+        h("div", { class: "dialog-actions" },
+          h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
+          h("button", { class: "btn primary", type: "button", onclick: async () => {
+            try {
+              const saved = await api("/bank/" + q.id, { method: "PATCH", json: { text: text.value, topic: topic.value, difficulty: diff.value, marks: marks.value || null, answer: answer.value } });
+              Object.assign(q, saved);
+              dialog.close();
+              fillTopics();
+              paint();
+            } catch (error) { failed(error); }
+          } }, "Save"))));
+      dialog.showModal();
+      text.focus();
+    }
+
+    function questionRow(q) {
+      const box = h("input", { type: "checkbox", checked: chosen.has(q.id), "aria-label": "Use this question",
+        onchange: () => {
+          if (box.checked) chosen.add(q.id); else chosen.delete(q.id);
+          box.closest(".bank-row").classList.toggle("chosen", box.checked);
+          paintBuilder();
+        } });
+      const chips = [];
+      if (q.topic) chips.push(h("span", { class: "chip info" }, q.topic));
+      if (q.difficulty) chips.push(h("span", { class: "chip" }, q.difficulty));
+      if (q.marks) chips.push(h("span", { class: "chip" }, plural(q.marks, "mark")));
+      if (q.used) chips.push(h("span", { class: "chip" }, "Used " + (q.used === 1 ? "once" : q.used + " times")));
+      return h("article", { class: "bank-row" + (chosen.has(q.id) ? " chosen" : "") },
+        h("label", { class: "bank-check" }, box),
+        h("div", { class: "grow bank-body" },
+          h("p", { class: "qtext" }, q.text),
+          q.options && q.options.length ? h("ol", { type: "a" }, q.options.map((o) => h("li", null, o))) : null,
+          h("div", { class: "chips" }, chips),
+          q.answer && h("details", null, h("summary", null, "Answer"), h("div", { class: "source" }, markdown(q.answer))),
+          h("p", { class: "muted small-text" }, "From " + (q.origin ? q.origin.title : "an earlier homework") + (q.textbook ? " · " + q.textbook : ""))),
+        h("div", { class: "bank-actions" },
+          h("button", { class: "btn ghost small icon-only", type: "button", title: "Edit", "aria-label": "Edit question", onclick: () => editQuestion(q) }, icon("edit")),
+          h("button", { class: "btn ghost small icon-only", type: "button", title: "Delete", "aria-label": "Delete question", onclick: async () => {
+            if (!(await confirmDialog("Delete this question?", "It will be removed from the bank. Homework that already uses it keeps it.", "Delete"))) return;
+            try {
+              await api("/bank/" + q.id, { method: "DELETE" });
+              questions = questions.filter((x) => x.id !== q.id);
+              chosen.delete(q.id);
+              fillTopics();
+              paint();
+            } catch (error) { failed(error); }
+          } }, icon("trash"))));
+    }
+
+    function paint() {
+      const rows = visible();
+      const allTicked = rows.length && rows.every((q) => chosen.has(q.id));
+      listCard.replaceChildren(
+        h("div", { class: "row" }, h("span", { class: "muted small-text grow" }, rows.length === questions.length ? plural(questions.length, "question") : rows.length + " of " + plural(questions.length, "question")),
+          rows.length ? h("button", { class: "btn ghost small", type: "button", onclick: () => {
+            for (const q of rows) { if (allTicked) chosen.delete(q.id); else chosen.add(q.id); }
+            paint();
+          } }, allTicked ? "Untick these" : "Tick all shown") : null),
+        rows.length ? h("div", { class: "list" }, rows.map(questionRow)) : empty("bank", "No questions match these filters."));
+      paintBuilder();
+    }
+
+    // Builder: what's ticked, automatic picking and the optional top-up.
+    const rules = [{ topic: "any", difficulty: "any", count: 5 }];
+    let shortfall = [];
+    const builder = h("form", { class: "card", novalidate: true, onsubmit: (e) => e.preventDefault() });
+    const titleInput = h("input", { type: "text", placeholder: "Title (optional)", maxLength: 160, "aria-label": "Assignment title" });
+    const topUp = h("input", { type: "checkbox" });
+    const bookPicker = picker("Textbook for new questions", "textbook");
+    const ruleBox = h("div", { class: "grid rules" });
+
+    function paintRules() {
+      ruleBox.replaceChildren(...rules.map((rule, index) => {
+        const count = h("input", { type: "number", min: 1, max: 50, value: rule.count, "aria-label": "How many", oninput: () => { rule.count = Number(count.value) || 1; } });
+        const topic = h("select", { "aria-label": "Topic", onchange: () => { rule.topic = topic.value; } },
+          h("option", { value: "any" }, "Any topic"), topicNames().map((t) => h("option", { value: t }, t)));
+        topic.value = rule.topic;
+        const diff = h("select", { "aria-label": "Difficulty", onchange: () => { rule.difficulty = diff.value; } },
+          h("option", { value: "any" }, "Any"), listing.difficulties.map((d) => h("option", { value: d }, d)));
+        diff.value = rule.difficulty;
+        return h("div", { class: "rule" }, count, diff, topic,
+          rules.length > 1 && h("button", { class: "btn ghost small icon-only", type: "button", "aria-label": "Remove rule", title: "Remove rule",
+            onclick: () => { rules.splice(index, 1); paintRules(); } }, icon("no")));
+      }));
+    }
+
+    async function autoPick(button) {
+      button.disabled = true;
+      try {
+        const out = await api("/bank/pick", { method: "POST", json: { rules, exclude: [...chosen] } });
+        for (const qid of out.picked) chosen.add(qid);
+        shortfall = out.shortfall;
+        toast(out.picked.length ? "Picked " + plural(out.picked.length, "question") : "No more questions match those rules", out.picked.length ? null : "bad");
+        paint();
+      } catch (error) { failed(error); }
+      button.disabled = false;
+    }
+
+    function paintBuilder() {
+      const picked = questions.filter((q) => chosen.has(q.id));
+      const marks = picked.reduce((sum, q) => sum + (q.marks || 0), 0);
+      const missing = shortfall.reduce((sum, r) => sum + r.missing, 0);
+      const pickButton = h("button", { class: "btn", type: "button", onclick: (e) => autoPick(e.currentTarget) }, icon("spark"), "Pick for me");
+      const create = h("button", { class: "btn primary", type: "button", disabled: !picked.length && !(topUp.checked && missing) }, icon("plus"), "Create assignment");
+      const slot = h("div");
+      create.addEventListener("click", async () => {
+        const params = { question_ids: [...chosen], title: titleInput.value };
+        if (topUp.checked && missing) {
+          params.top_up = shortfall.map((r) => ({ topic: r.topic, difficulty: r.difficulty, count: r.missing }));
+          params.textbook_id = formValue(builder, "textbook_id");
+          if (!params.textbook_id || params.textbook_id === "__upload") return toast("Choose a textbook for the new questions.", "bad");
+        }
+        const panel = progressPanel();
+        slot.replaceChildren(panel.node);
+        create.disabled = true;
+        try {
+          const output = await runJob("bank_assignment", params, panel.update);
+          location.hash = "#/result/" + output.result_id;
+        } catch (error) {
+          slot.replaceChildren(h("div", { class: "banner bad", role: "alert" }, icon("warn"), h("div", null, error.message)));
+          create.disabled = false;
+        }
+      });
+      put(builder,
+        h("h2", null, "New assignment"),
+        tiles([[picked.length, "chosen"], [marks, "marks"]]),
+        titleInput,
+        h("details", { class: "picker-rules", open: !picked.length },
+          h("summary", null, "Pick automatically"),
+          h("p", { class: "muted small-text" }, "Least-used questions come first. This uses no AI."),
+          ruleBox,
+          h("div", { class: "row" },
+            h("button", { class: "btn ghost small", type: "button", onclick: () => { rules.push({ topic: "any", difficulty: "any", count: 2 }); paintRules(); } }, icon("plus"), "Add rule"),
+            pickButton)),
+        missing ? h("div", { class: "banner" }, icon("warn"), h("div", { class: "grid" },
+          h("span", null, "The bank is short of " + shortfall.map((r) => r.missing + " " + (r.difficulty === "any" ? "" : r.difficulty + " ") + "question" + (r.missing === 1 ? "" : "s") +
+            (r.topic === "any" ? "" : " on " + r.topic)).join(", ") + "."),
+          h("label", { class: "check-chip" }, topUp, "Write the missing ones with AI"))) : null,
+        missing && topUp.checked ? bookPicker : null,
+        h("div", { class: "row" }, create,
+          picked.length ? h("button", { class: "btn ghost small", type: "button", onclick: () => { chosen.clear(); shortfall = []; paint(); } }, "Clear") : null),
+        slot);
+    }
+    topUp.addEventListener("change", paintBuilder);
+
+    fillTopics();
+    paintRules();
+    node.append(h("div", { class: "split" },
+      h("div", { class: "grid" }, h("div", { class: "row filters" }, h("div", { class: "grow" }, search), topicSelect, diffSelect), listCard),
+      h("div", { class: "grid sticky" }, builder)));
+    paint();
     return node;
   }
 
@@ -881,7 +1493,7 @@
   }
 
   // ---------- routing and theme ----------
-  const routes = { "": homePage, library: libraryPage, check: checkPage, create: createPage, notes: notesPage, history: historyPage };
+  const routes = { "": homePage, library: libraryPage, check: checkPage, create: createPage, notes: notesPage, history: historyPage, bank: bankPage };
   const navFor = { "": "home", result: "history" };
 
   async function route() {
@@ -897,6 +1509,7 @@
       if (!state.status) await refreshStatus();
       if (first === "result" && second) node = await resultPage(second);
       else if (first === "ask") node = await askPage(second);
+      else if (first === "grade") node = await gradePage(second);
       else if (routes[first]) node = await routes[first]();
       else node = h("div", { class: "page" }, h("div", { class: "card" }, empty("warn", "That page doesn't exist.", h("a", { class: "btn", href: "#/" }, "Go home"))));
     } catch (error) {
