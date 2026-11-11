@@ -204,7 +204,7 @@ sequenceDiagram
     participant J as Job runner
     participant S as Grading service
     participant DB as SQLite
-    participant G as AI model: Gemini or Ollama
+    participant G as Gemini or Ollama
 
     T->>UI: Choose a homework and students' files
     UI->>API: POST /api/jobs/grade_answers
