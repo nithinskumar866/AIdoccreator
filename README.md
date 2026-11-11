@@ -1,7 +1,7 @@
 # DocuMentor
 
-**Check, write and grade homework against your own textbook, with Google Gemini doing the
-reading and you making every decision.**
+**Check, write and grade homework against your own textbook, with an AI model doing the reading
+(Google Gemini, or your own through Ollama) and you making every decision.**
 
 DocuMentor reads your textbook and class notes, then helps with the paperwork around them. It
 finds off-topic homework questions, writes new assignments with answer keys, catches mistakes
@@ -19,6 +19,7 @@ your own models through Ollama, for example on a RunPod GPU.
 
 ## Contents
 
+- [What's new](#whats-new): everything added in this version
 - [What it does](#what-it-does)
 - [Workflow](#workflow): how the tools fit together
 - [Architecture](#architecture): the parts of the app and how a task runs
@@ -27,6 +28,49 @@ your own models through Ollama, for example on a RunPod GPU.
 - [A full walkthrough](#a-full-walkthrough): one teaching unit from start to finish, with screenshots
 - [How it keeps you in control](#how-it-keeps-you-in-control)
 - [Settings](#settings) · [Privacy and security](#privacy-and-security) · [Project layout](#project-layout) · [Tests](#tests)
+
+## What's new
+
+Everything below was added on top of the original homework checker, notes reviewer and chat.
+
+**Teaching tools**
+
+- **Compare versions.** The original homework next to your accepted version, with changed words
+  highlighted, and a Word "changes report" to go with it.
+- **Question bank.** Save the questions you choose from any homework, tag them by topic and
+  difficulty, edit them, and build new assignments by ticking questions or letting the app pick.
+  If the bank is short, the AI can write the missing questions.
+- **Grade answers.** Upload one file per student with numbered answers. You get suggested marks
+  and feedback checked against your answer key and the textbook, a class summary with the
+  average for each question, flags on answers that need a closer look, and bulk or one-by-one
+  confirming. Export to Word and CSV.
+
+**Agents (LangGraph and LangChain)**
+
+- **Teacher assistant.** A tool-calling agent that chooses what to look up across your
+  documents, question bank, homework and gradings, and shows every step it took.
+- **Assignment planner.** Turns a request like "a 10-mark quiz on clustering" into a draft from
+  your bank plus new questions, checks it (marks add up, topics covered, no near-duplicates),
+  revises it, and then pauses for your approval. Nothing is saved until you approve.
+- **Grading second opinion.** Re-checks unclear marks, including zeros that may be harsh, by
+  searching the textbook and notes itself. Its opinion appears beside your mark as advice.
+- **Hybrid search.** Keyword (BM25) and meaning (embeddings) search combined, with documents
+  indexed in the background after upload.
+- **Memory.** Assistant conversations and paused plans are saved, so they survive a restart.
+
+**Models**
+
+- **Run on your own GPU.** Every feature, agents included, can use models you host with Ollama,
+  for example on a RunPod GPU, instead of Google Gemini. Switch with one setting.
+- **Safeguards for smaller models.** The code reads the question count, total marks and topics
+  straight from your request, fills gaps in the plan, balances marks, and opens the newest item
+  when a model passes a made-up id, so even an 8B model gives usable results.
+
+**Under the hood**
+
+- An illustrated walkthrough, plus architecture, workflow and agent diagrams in this README.
+- 94 tests, including the agents' graphs and the Ollama connection, all running without spending
+  any AI quota.
 
 ## What it does
 
@@ -103,7 +147,7 @@ again later.
 DocuMentor is one small Python web app that runs on your computer. The page in your browser
 talks to it through a JSON API. Long AI tasks run in the background while the page shows their
 progress. Only passages from your documents, and students' answers when grading, leave your
-computer, sent to Google Gemini.
+computer, sent to the model: Google Gemini, or your own Ollama server.
 
 ```mermaid
 flowchart TB
@@ -132,7 +176,7 @@ flowchart TB
         Store[("SQLite, core/store.py<br/>documents, jobs, results, chats,<br/>question bank, embeddings")]
     end
 
-    Gemini["Google Gemini API"]
+    Gemini["Google Gemini API<br/>or your Ollama server"]
 
     UI -- "fetch /api/..." --> Guard --> API
     API -- "upload" --> Docs --> Store
@@ -160,7 +204,7 @@ sequenceDiagram
     participant J as Job runner
     participant S as Grading service
     participant DB as SQLite
-    participant G as Gemini
+    participant G as AI model: Gemini or Ollama
 
     T->>UI: Choose a homework and students' files
     UI->>API: POST /api/jobs/grade_answers
@@ -190,12 +234,12 @@ sequenceDiagram
 
 ## Agents
 
-Most of DocuMentor is a set of **fixed pipelines**: the code decides every step, and Gemini is
+Most of DocuMentor is a set of **fixed pipelines**: the code decides every step, and the model is
 asked one precise question at a time. That's the right design for checking and grading, where
 results have to be predictable and uploaded text must never steer anything.
 
 Three jobs need more than one step, so they are **agents**, built as LangGraph state graphs on
-LangChain's Gemini integration:
+LangChain's Gemini or Ollama integration:
 
 | Agent | What the model decides | Tools | Can it change your data? |
 |---|---|---|---|
@@ -216,13 +260,13 @@ flowchart TB
         A3["Second opinion"]
     end
 
-    Graphs --> LLM["ChatGoogleGenerativeAI<br/>tool calls, structured output,<br/>rate limiter, retries"]
+    Graphs --> LLM["ChatGoogleGenerativeAI or ChatOllama<br/>tool calls, structured output,<br/>rate limiter, retries"]
     Graphs --> Tools["Read-only tools<br/>core/agents/tools.py"]
     Graphs -- "memory and paused plans" --> CK[("agents.sqlite3<br/>LangGraph checkpoints")]
     Tools --> Hybrid["Hybrid search<br/>core/hybrid.py"]
     Tools --> Store[("documentor.sqlite3<br/>library, bank, results,<br/>embeddings")]
     A2 -- "saves only after you approve" --> Store
-    LLM --> Gemini["Google Gemini"]
+    LLM --> Gemini["Google Gemini<br/>or your Ollama server"]
     Indexer["Index worker<br/>after each upload"] -- "embeddings" --> Gemini
     Indexer --> Store
 ```
@@ -240,7 +284,7 @@ work.
 
 ```mermaid
 flowchart LR
-    S((start)) --> A["agent<br/>Gemini with 7 read-only tools"]
+    S((start)) --> A["agent<br/>the model with 7 read-only tools"]
     A -- "tool calls" --> T["tools<br/>LangGraph ToolNode"]
     T --> A
     A -- "answer, or step limit reached" --> E((end))
@@ -279,7 +323,7 @@ you click **Use**.
 
 ```mermaid
 flowchart LR
-    S((start)) --> R["research<br/>Gemini with document search"]
+    S((start)) --> R["research<br/>the model with document search"]
     R -- "search" --> T["tools"]
     T --> R
     R -- "enough, or 3 searches" --> D["decide<br/>structured verdict"]
@@ -288,8 +332,10 @@ flowchart LR
 
 ### Hybrid search
 
-The agents search by **keywords** (BM25) and by **meaning** (Gemini embeddings,
-`gemini-embedding-001` at 768 dimensions), and combine both rankings with Reciprocal Rank Fusion.
+The agents search by **keywords** (BM25) and by **meaning** (embeddings: Gemini's
+`gemini-embedding-001`, or `nomic-embed-text` on Ollama, both at 768 dimensions), and combine both
+rankings with Reciprocal Rank Fusion. Embeddings are stored per model and never mixed: after switching
+models, press **Index** on each document in the Library.
 Meaning search finds a passage about "K-means clustering" when you ask about "grouping students'
 data", even with no word in common.
 
@@ -300,8 +346,9 @@ search quietly uses keywords alone. Students' work isn't embedded.
 
 ### Limits
 
-- Agents make several Gemini calls per task, paced to your requests-per-minute setting, so an
-  assistant answer typically takes 20 to 40 seconds.
+- Agents make several model calls per task. On Gemini's free tier they are paced to your
+  requests-per-minute setting, so an assistant answer typically takes 20 to 40 seconds; on your
+  own GPU through Ollama it takes a few seconds.
 - The near-duplicate check compares meaning with a cut-off of 0.94, measured on real questions.
   With a very short textbook, the planner can still write questions that overlap without crossing
   it. Untick them, or ask for changes.
@@ -310,7 +357,8 @@ search quietly uses keywords alone. Students' work isn't embedded.
 
 ## Quick start
 
-You need Python 3.10 or newer and a [Gemini API key](https://aistudio.google.com/apikey).
+You need Python 3.10 or newer and a [Gemini API key](https://aistudio.google.com/apikey), or
+your own Ollama server instead (see [Run on your own GPU](#run-on-your-own-gpu-ollama-or-runpod)).
 
 ```bash
 python -m venv .venv
@@ -598,6 +646,8 @@ Set these in `.env`. See [.env.example](.env.example) for the full list.
 | `OLLAMA_MODEL` | `llama3.1:8b` | Chat model; must support tool calling |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model for meaning search |
 | `OLLAMA_NUM_CTX` | `16384` | Context size asked for on each request |
+| `OLLAMA_API_KEY` | none | Only if a proxy in front of Ollama asks for one |
+| `OLLAMA_REQUESTS_PER_MINUTE` | `0` | Pacing for a shared server; `0` means no pacing |
 | `PORT` | `10000` | Local port |
 | `DOCUMENTOR_DATA_DIR` | `data` | Where your library and results are saved |
 
@@ -642,8 +692,9 @@ tests/              Test suite
 ## Tests
 
 The tests use a scripted AI and a scripted LangChain chat model and embeddings, so they are
-fast and spend no quota. They cover the agents' tool loops, the planner's revise and approval
-paths, step limits, and that uploaded text stays fenced as data.
+fast and spend no quota. The 94 tests cover the agents' tool loops, the planner's revise and
+approval paths, step limits, grading and the question bank, the Ollama client and its error
+messages, and that uploaded text stays fenced as data.
 
 ```bash
 pip install -r requirements-dev.txt
