@@ -174,9 +174,15 @@
         root.append(list);
         continue;
       }
+      if (/^\s*>/.test(line)) {
+        const quoted = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) quoted.push(lines[i++].replace(/^\s*>\s?/, ""));
+        root.append(h("blockquote", null, inline(quoted.join(" "))));
+        continue;
+      }
       const para = [line];
       i += 1;
-      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*[-*•]\s|\s*\d+[.)]\s|\s*\|)/.test(lines[i])) para.push(lines[i++]);
+      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*[-*•]\s|\s*\d+[.)]\s|\s*\||\s*>)/.test(lines[i])) para.push(lines[i++]);
       root.append(h("p", null, inline(para.join(" "))));
     }
     return root;
@@ -222,15 +228,19 @@
     return { node, update(job) { fill.style.width = job.progress + "%"; text.textContent = job.message; } };
   }
 
-  async function runJob(type, params, onProgress, path) {
-    const start = await api(path || "/jobs/" + type, { method: "POST", json: params });
+  async function pollJob(jobId, onProgress) {
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const job = await api("/jobs/" + start.job_id);
+      const job = await api("/jobs/" + jobId);
       if (onProgress) onProgress(job);
       if (job.status === "done") return job.output;
       if (job.status === "failed") throw new Error(job.error || "That task failed. Please try again.");
     }
+  }
+
+  async function runJob(type, params, onProgress, path) {
+    const start = await api(path || "/jobs/" + type, { method: "POST", json: params });
+    return pollJob(start.job_id, onProgress);
   }
 
   async function refreshStatus() {
@@ -353,6 +363,11 @@
       tool("#/bank", "bank", "Question bank", "Keep your best questions and build new assignments from them."),
       tool("#/ask", "chat", "Ask your documents", "Chat with follow-up questions and answers that cite their source."),
       tool("#/notes", "notes", "Review notes", "Separate real mistakes from content the textbook simply doesn't cover.")));
+    node.append(h("section", { class: "grid" }, h("div", { class: "row" }, h("h2", { class: "grow" }, "Agents"),
+      h("span", { class: "muted small-text" }, "Built with LangGraph. They look things up and plan, and you approve.")),
+      h("div", { class: "grid two" },
+        tool("#/assistant", "agent", "Teacher assistant", "Ask anything about your documents, bank, homework or gradings. It searches, tries again, and shows its steps."),
+        tool("#/planner", "plan", "Plan an assignment", "Describe a test in plain words. It drafts from your bank, writes what's missing, checks itself, and waits for your approval."))));
     if (!docs.length) {
       node.append(h("section", { class: "card" }, h("h2", null, "Getting started"),
         h("ol", { class: "steps" },
@@ -381,7 +396,30 @@
     const node = page("Library", "Add a document once and use it in every tool. Only the extracted text is kept, on this computer.");
     const listCard = h("section", { class: "card" });
 
+    function indexChip(doc) {
+      if (doc.role === "answers" || !state.status || !state.status.agents) return null;
+      const ix = doc.index;
+      const reindex = async (e) => {
+        e.currentTarget.disabled = true;
+        try { await api("/documents/" + doc.id + "/index", { method: "POST" }); toast("Preparing meaning search"); setTimeout(refresh, 1500); }
+        catch (error) { failed(error); }
+      };
+      if (ix && ix.status === "ready") return h("span", { class: "chip good", title: "Agents can search this by meaning as well as keywords" }, icon("yes"), "Meaning search");
+      if (ix && ix.status === "indexing") return h("span", { class: "chip info" }, h("span", { class: "spinner small" }), "Preparing " + Math.round(100 * ix.embedded / Math.max(ix.chunks, 1)) + "%");
+      return h("span", { class: "row tight" }, h("span", { class: "chip warn", title: (ix && ix.error) || "Keyword search is used until this is ready" }, "Keywords only"),
+        h("button", { class: "btn ghost small", type: "button", onclick: reindex }, ix ? "Retry" : "Prepare"));
+    }
+
+    const token = state.navToken;
+    async function refresh() {
+      if (token !== state.navToken) return;
+      await loadDocuments();
+      if (token !== state.navToken) return;
+      renderList();
+    }
+
     function renderList() {
+      if (state.documents.some((d) => d.index && d.index.status === "indexing")) setTimeout(refresh, 2500);
       listCard.replaceChildren();
       if (!state.documents.length) {
         listCard.append(empty("book", "No documents yet. Add a textbook to get started."));
@@ -402,6 +440,7 @@
       return h("div", { class: "list-row" },
         h("div", { class: "grow" }, h("div", { class: "name" }, doc.name),
           h("div", { class: "muted small-text" }, size(doc))),
+        indexChip(doc),
         role,
         h("button", { class: "btn ghost small", type: "button", onclick: () => previewDocument(doc) }, icon("eye"), "Preview"),
         h("button", { class: "btn ghost small icon-only", type: "button", title: "Delete " + doc.name, "aria-label": "Delete " + doc.name,
@@ -1089,6 +1128,34 @@
     const questions = () => Object.fromEntries(result.data.questions.map((q) => [q.id, q]));
     const lineFor = (sid) => result.summary.students.find((s) => s.id === sid);
 
+    // Ask the second-opinion agent; it researches the textbook and advises, but changes no marks.
+    async function secondOpinion(payload, button) {
+      const panel = stepsPanel("Starting the second-opinion agent");
+      button.replaceWith(panel.node);
+      try {
+        const start = await api("/results/" + id + "/second-opinion", { method: "POST", json: payload });
+        const out = await pollJob(start.job_id, panel.update);
+        result = await api("/results/" + id);
+        toast(plural(out.reviewed, "second opinion") + " added");
+      } catch (error) { failed(error); }
+      render();
+    }
+
+    function opinionBox(student, entry, question) {
+      const o = entry.second_opinion;
+      if (!o) return null;
+      const current = entry.decision === "accepted" ? entry.mark : entry.suggested;
+      return h("div", { class: "opinion" + (o.agrees ? " agrees" : " differs") },
+        h("div", { class: "row" }, icon("agent"),
+          h("strong", { class: "grow" }, "Second opinion: " + o.mark + " / " + question.marks + (o.agrees ? ", agrees" : ", first mark was " + o.first_mark)),
+          o.mark !== current && h("button", { class: "btn small", type: "button",
+            onclick: () => patch({ student_id: student.id, question_id: question.id, mark: o.mark }) }, "Use " + o.mark)),
+        h("p", null, o.reasoning),
+        o.searches && o.searches.length ? h("div", { class: "chips" }, h("span", { class: "muted small-text" }, "Searched:"),
+          o.searches.map((q) => h("span", { class: "chip" }, q))) : null,
+        sourcesBlock(o.sources));
+    }
+
     function answerCard(student, entry, question) {
       const pending = entry.decision === "pending";
       const chips = [];
@@ -1114,6 +1181,7 @@
         h("div", { class: "answer-box" }, h("span", { class: "tag" }, "Student's answer"),
           h("span", { class: "qtext" }, entry.answer || "No answer found under this number.")),
         entry.feedback && h("p", { class: "reason" }, entry.feedback),
+        opinionBox(student, entry, question),
         question.answer && h("details", null, h("summary", null, "Answer key"), h("div", { class: "source" }, markdown(question.answer))),
         sourcesBlock(entry.sources),
         h("div", { class: "actions mark-actions" },
@@ -1124,7 +1192,10 @@
             (text) => patch({ student_id: student.id, question_id: question.id, feedback: text })) }, icon("edit"), "Feedback"),
           h("button", { class: "btn ghost small", type: "button", onclick: () => textDialog("Fix the student's answer", entry.answer,
             "Use this when an answer was matched to the wrong number. The answer will need marking again.",
-            (text) => patch({ student_id: student.id, question_id: question.id, answer: text })) }, icon("edit"), "Fix answer")));
+            (text) => patch({ student_id: student.id, question_id: question.id, answer: text })) }, icon("edit"), "Fix answer"),
+          entry.graded && state.status && state.status.agents && h("button", { class: "btn ghost small", type: "button",
+            onclick: (e) => secondOpinion({ student_id: student.id, question_id: question.id }, e.currentTarget) },
+            icon("agent"), entry.second_opinion ? "Ask again" : "Second opinion")));
     }
 
     function studentPane(student) {
@@ -1144,6 +1215,8 @@
         student.error ? null : tiles([[line.score + " / " + line.max, "score"], [line.percent + "%", "percent"], [line.pending, "to confirm"]]),
         h("div", { class: "row" },
           line.pending ? h("button", { class: "btn small", type: "button", onclick: () => patch({ bulk: "accepted", student_id: student.id }) }, icon("yes"), "Confirm all suggested marks") : null,
+          state.status && state.status.agents ? h("button", { class: "btn small", type: "button",
+            onclick: (e) => secondOpinion({ student_id: student.id }, e.currentTarget) }, icon("agent"), "Second opinions on unclear marks") : null,
           line.flagged ? h("span", { class: "muted small-text" }, plural(line.flagged, "flagged answer") + " must be confirmed one by one.") : null)));
       if (student.error || unmarked) {
         const button = h("button", { class: "btn small", type: "button", onclick: (e) => regrade(student, e.currentTarget) }, icon("spark"), student.error ? "Try again" : "Mark " + plural(unmarked, "answer"));
@@ -1199,7 +1272,10 @@
       put(pane, student ? studentPane(student) : classPane());
     }
 
-    const bulkAll = h("button", { class: "btn small", type: "button", onclick: () => patch({ bulk: "accepted" }) }, icon("yes"), "Confirm all suggested marks");
+    const bulkAll = h("div", { class: "grid" },
+      h("button", { class: "btn small", type: "button", onclick: () => patch({ bulk: "accepted" }) }, icon("yes"), "Confirm all suggested marks"),
+      state.status && state.status.agents ? h("button", { class: "btn small", type: "button", title: "An agent re-checks flagged and partly right answers against the textbook",
+        onclick: (e) => secondOpinion({}, e.currentTarget) }, icon("agent"), "Second opinions on unclear marks") : null);
     node.append(
       h("header", { class: "page-head" }, h("div", null,
         h("span", { class: "chip info" }, "Grading"), title,
@@ -1409,6 +1485,234 @@
     return node;
   }
 
+  // ---------- agents ----------
+  function agentsBanner() {
+    if (!state.status || state.status.agents) return null;
+    return keyBanner() || h("div", { class: "banner" }, icon("key"), h("div", null, "The agents need a Gemini API key."));
+  }
+
+  // A live list of what the agent is doing, built from the job's progress messages.
+  function stepsPanel(intro) {
+    const list = h("ol", { class: "live-steps" });
+    const text = h("span", null, intro);
+    const node = h("div", { class: "card progress", role: "status", "aria-live": "polite" },
+      h("div", { class: "typing" }, h("span", { class: "spinner" }), text), list);
+    let last = "";
+    return {
+      node,
+      update(job) {
+        if (!job.message || job.message === last || job.message === "Starting") return;
+        last = job.message;
+        text.textContent = job.message;
+        list.append(h("li", null, job.message));
+      },
+    };
+  }
+
+  const TOOL_ICON = { search_documents: "book", search_question_bank: "bank", list_saved_work: "clock", get_homework: "check",
+    get_grading_summary: "grade", get_student_answers: "grade", list_documents: "book" };
+
+  function stepsBlock(steps) {
+    if (!steps || !steps.length) return null;
+    return h("details", { class: "agent-steps" }, h("summary", null, icon("agent"), plural(steps.length, "step") + " taken"),
+      h("ol", null, steps.map((s) => h("li", null,
+        h("div", { class: "step-label" }, icon(TOOL_ICON[s.tool] || "spark"), s.label),
+        s.result && h("div", { class: "step-result" }, s.result.length >= 500 ? s.result + "…" : s.result)))));
+  }
+
+  async function assistantPage(threadId) {
+    const { threads } = await api("/agents/threads?kind=assistant");
+    const node = page("Teacher assistant", "An agent that looks things up for you. It searches your documents, question bank, homework and gradings, tries again when a search misses, and shows every step it took. It can read, but never change anything.");
+    const banner = agentsBanner();
+    if (banner) node.append(banner);
+    const list = h("nav", { class: "chat-list", "aria-label": "Conversations" },
+      h("a", { href: "#/assistant", "aria-current": String(!threadId) }, "+ New conversation"),
+      threads.map((t) => h("a", { href: "#/assistant/" + t.id, "aria-current": String(t.id === threadId) }, t.title)));
+    const thread = threadId ? await api("/agents/threads/" + threadId) : { id: null, title: "New conversation", messages: [] };
+    const messages = h("div", { class: "messages", "aria-live": "polite" });
+    const area = h("textarea", { placeholder: "Ask the assistant", rows: 1, maxLength: 4000, "aria-label": "Your question",
+      onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } } });
+    const button = h("button", { class: "btn primary", type: "button", onclick: () => send() }, icon("send"), "Send");
+
+    function bubble(message) {
+      if (message.role === "user") return h("div", { class: "msg user" }, message.content);
+      return h("div", { class: "msg assistant" }, stepsBlock(message.steps), markdown(message.content));
+    }
+    function starter() {
+      const ideas = ["Which questions did students find hardest in my last grading, and what does the textbook say about them?",
+        "Do I have hard questions on unsupervised learning in my bank?",
+        "Summarise what my notes say that the textbook doesn't"];
+      return h("div", { class: "empty" }, icon("agent"), h("p", null, "Ask about your documents, bank, homework or gradings."),
+        h("div", { class: "grid idea-list" }, ideas.map((s) => h("button", { class: "btn small idea", type: "button", onclick: () => { area.value = s; send(); } }, s))));
+    }
+    function paint() {
+      messages.replaceChildren(...(thread.messages.length ? thread.messages.map(bubble) : [starter()]));
+      messages.scrollTop = messages.scrollHeight;
+    }
+    async function send() {
+      const question = area.value.trim();
+      if (!question || button.disabled) return;
+      button.disabled = true;
+      area.value = "";
+      if (!thread.messages.length) messages.replaceChildren();
+      const panel = stepsPanel("Thinking");
+      messages.append(h("div", { class: "msg user" }, question), panel.node);
+      messages.scrollTop = messages.scrollHeight;
+      try {
+        const start = await api("/agents/assistant", { method: "POST", json: { question, thread_id: thread.id || undefined } });
+        await pollJob(start.job_id, (job) => { panel.update(job); messages.scrollTop = messages.scrollHeight; });
+        if (!thread.id) { location.hash = "#/assistant/" + start.thread_id; return; }
+        Object.assign(thread, await api("/agents/threads/" + thread.id));
+        paint();
+      } catch (error) {
+        area.value = question;
+        paint();
+        messages.append(h("div", { class: "banner bad", role: "alert" }, icon("warn"), h("div", null, error.message)));
+      } finally {
+        button.disabled = false;
+        area.focus();
+      }
+    }
+    paint();
+    node.append(h("div", { class: "chat-layout" }, h("div", { class: "card" }, list),
+      h("section", { class: "card chat-main" },
+        h("div", { class: "chat-title row" }, h("h2", { class: "grow" }, thread.title),
+          thread.id && h("button", { class: "btn ghost small icon-only", type: "button", title: "Delete conversation", "aria-label": "Delete conversation",
+            onclick: async () => {
+              if (!(await confirmDialog("Delete this conversation?", thread.title, "Delete"))) return;
+              try { await api("/agents/threads/" + thread.id, { method: "DELETE" }); location.hash = "#/assistant"; }
+              catch (error) { failed(error); }
+            } }, icon("trash"))),
+        messages, h("div", { class: "composer" }, area, button))));
+    return node;
+  }
+
+  const PLAN_STATUS = { review: ["warn", "Waiting for your review"], saved: ["good", "Saved"], cancelled: ["", "Cancelled"],
+    working: ["info", "Working"], new: ["info", "Working"] };
+
+  async function plannerPage(threadId) {
+    await loadDocuments();
+    if (threadId) return planView(threadId);
+    const { threads } = await api("/agents/threads?kind=planner");
+    const node = page("Plan an assignment", "Describe the assignment in your own words. The planner agent reads your request, searches the question bank, writes only what the bank lacks, checks marks, topics and duplicates, fixes its own problems, then waits for your approval. Nothing is saved until you approve.", null, true);
+    const banner = agentsBanner();
+    if (banner) node.append(banner);
+    const request = h("textarea", { name: "request", rows: 4, maxLength: 2000,
+      placeholder: "For example: a 20-mark test on unsupervised learning, mostly medium difficulty, avoiding questions I used recently." });
+    const examples = ["A 10-mark quiz on supervised learning with 4 questions", "A hard 20-mark test on unsupervised learning, avoiding recent questions",
+      "5 easy revision questions covering every topic"];
+    const book = picker("Write new questions from", "textbook", { optional: true, hint: "Leave as None to use your most recent textbook." });
+    const button = h("button", { class: "btn primary", type: "submit" }, icon("agent"), "Plan it");
+    const slot = h("div");
+    const form = h("form", { class: "card", novalidate: true, onsubmit: async (event) => {
+      event.preventDefault();
+      if (request.value.trim().length < 8) return toast("Describe the assignment you want first.", "bad");
+      const panel = stepsPanel("Starting the planner");
+      slot.replaceChildren(panel.node);
+      button.disabled = true;
+      try {
+        const textbook = formValue(form, "textbook_id");
+        const start = await api("/agents/planner", { method: "POST", json: { request: request.value, textbook_id: textbook && textbook !== "__upload" ? textbook : null } });
+        await pollJob(start.job_id, panel.update);
+        location.hash = "#/planner/" + start.thread_id;
+      } catch (error) {
+        slot.replaceChildren(h("div", { class: "banner bad", role: "alert" }, icon("warn"), h("div", null, error.message)));
+        button.disabled = false;
+      }
+    } },
+      h("label", { class: "field" }, "What do you need?", request),
+      h("div", { class: "chips" }, examples.map((e) => h("button", { class: "btn small", type: "button", onclick: () => { request.value = e; request.focus(); } }, e))),
+      book, h("div", { class: "row" }, button));
+    node.append(form, slot);
+    if (threads.length) {
+      node.append(h("section", { class: "card" }, h("h2", null, "Earlier plans"), h("div", { class: "list" }, threads.map((t) => {
+        const [tone, label] = PLAN_STATUS[t.status] || PLAN_STATUS.working;
+        return h("div", { class: "list-row" }, h("a", { class: "list-link grow", href: "#/planner/" + t.id },
+          h("div", { class: "name" }, t.title), h("div", { class: "muted small-text" }, when(t.updated_at))),
+          h("span", { class: "chip " + tone }, label));
+      }))));
+    }
+    return node;
+  }
+
+  async function planView(threadId) {
+    let plan = await api("/agents/threads/" + threadId);
+    const node = h("div", { class: "page" });
+    const body = h("div", { class: "grid" });
+
+    function itemRow(item, n, editable) {
+      const box = editable && h("input", { type: "checkbox", checked: true, "data-id": item.id, "aria-label": "Keep question " + n });
+      const chips = [h("span", { class: "chip " + (item.added ? "good" : "info") }, item.added ? "Newly written" : "From your bank")];
+      for (const t of item.topics || []) chips.push(h("span", { class: "chip info" }, t));
+      if (item.difficulty) chips.push(h("span", { class: "chip" }, item.difficulty));
+      if (item.marks) chips.push(h("span", { class: "chip" }, plural(item.marks, "mark")));
+      return h("article", { class: "bank-row chosen" },
+        editable ? h("label", { class: "bank-check" }, box) : h("span", { class: "qnum" }, "Q" + n),
+        h("div", { class: "grow bank-body" },
+          h("p", { class: "qtext" }, item.original),
+          item.options && item.options.length ? h("ol", { type: "a" }, item.options.map((o) => h("li", null, o))) : null,
+          h("div", { class: "chips" }, chips),
+          item.answer && h("details", null, h("summary", null, "Answer"), h("div", { class: "source" }, markdown(item.answer))),
+          sourcesBlock(item.sources)));
+    }
+
+    async function decide(action, button) {
+      const remove = [...body.querySelectorAll("input[data-id]:not(:checked)")].map((b) => b.dataset.id);
+      const feedback = (body.querySelector("textarea[name=feedback]") || {}).value || "";
+      if (action === "revise" && !feedback.trim() && !remove.length) return toast("Say what to change, or untick the questions to drop.", "bad");
+      if (action === "approve" && remove.length === plan.items.length) return toast("Keep at least one question.", "bad");
+      const panel = stepsPanel(action === "approve" ? "Saving" : action === "revise" ? "Applying your feedback" : "Cancelling");
+      button.closest(".plan-actions").replaceWith(panel.node);
+      try {
+        const start = await api("/agents/planner/" + threadId + "/resume", { method: "POST", json: { action, feedback, remove } });
+        await pollJob(start.job_id, panel.update);
+        plan = await api("/agents/threads/" + threadId);
+        if (plan.status === "saved") toast("Saved to History");
+      } catch (error) { failed(error); }
+      paint();
+    }
+
+    function paint() {
+      const [tone, label] = PLAN_STATUS[plan.status] || PLAN_STATUS.working;
+      const spec = plan.spec || {};
+      const specChips = [];
+      if (spec.question_count) specChips.push(plural(spec.question_count, "question"));
+      if (spec.total_marks) specChips.push(spec.total_marks + " marks");
+      specChips.push(...(spec.topics && spec.topics.length ? spec.topics : ["any topic"]));
+      if (spec.difficulty) specChips.push(spec.difficulty);
+      if (spec.avoid_recent) specChips.push("avoid recent questions");
+      const reviewing = plan.status === "review";
+      put(body,
+        h("section", { class: "card" }, h("h2", null, "What the agent did"),
+          h("ol", { class: "timeline" }, (plan.log || []).map((entry) => h("li", null, h("strong", null, entry.step), entry.detail && h("span", { class: "muted" }, entry.detail))))),
+        plan.status === "saved" && h("div", { class: "banner info" }, icon("yes"), h("div", { class: "grow" }, "Saved as homework. You can review, export, grade or compare it like any other."),
+          h("a", { class: "btn small", href: "#/result/" + plan.result_id }, "Open it")),
+        plan.status === "cancelled" && h("div", { class: "banner" }, icon("no"), h("div", null, "This plan was cancelled. Nothing was saved.")),
+        !["review", "saved", "cancelled"].includes(plan.status) && h("div", { class: "banner" }, icon("warn"), h("div", null, "This plan didn't finish, possibly because Gemini was busy. Start a new one from Plan an assignment.")),
+        plan.items && plan.items.length ? h("section", { class: "card" },
+          h("div", { class: "row" }, h("h2", { class: "grow" }, "Draft"), h("div", { class: "chips" }, specChips.map((c) => h("span", { class: "chip" }, c)))),
+          tiles([[plan.items.length, "questions"], [plan.total_marks, "marks" + (spec.total_marks ? " of " + spec.total_marks : "")],
+            [plan.items.filter((i) => i.added).length, "newly written"]]),
+          plan.problems.length ? h("div", { class: "banner" }, icon("warn"), h("div", null, h("strong", null, "Still not perfect after two tries: "), plan.problems.join(" "))) : null,
+          reviewing && h("p", { class: "muted small-text" }, "Untick any question to drop it."),
+          h("div", { class: "list" }, plan.items.map((item, i) => itemRow(item, i + 1, reviewing))),
+          reviewing && h("div", { class: "plan-actions grid" },
+            h("label", { class: "field" }, h("span", null, "Changes you want", h("span", { class: "hint" }, " (optional)")),
+              h("textarea", { name: "feedback", rows: 2, maxLength: 1500, placeholder: "For example: make question 2 harder and add one on PCA." })),
+            h("div", { class: "row" },
+              h("button", { class: "btn primary", type: "button", onclick: (e) => decide("approve", e.currentTarget) }, icon("yes"), "Approve and save"),
+              h("button", { class: "btn", type: "button", onclick: (e) => decide("revise", e.currentTarget) }, icon("agent"), "Ask for changes"),
+              h("button", { class: "btn ghost", type: "button", onclick: (e) => decide("cancel", e.currentTarget) }, "Cancel plan")))) : null);
+      header.replaceChildren(h("div", null, h("span", { class: "chip " + tone }, label), h("h1", null, plan.title),
+        h("p", { class: "muted small-text" }, "Requested " + when(plan.created_at))),
+        h("a", { class: "btn ghost small", href: "#/planner" }, "New plan"));
+    }
+    const header = h("header", { class: "page-head" });
+    node.append(header, body);
+    paint();
+    return node;
+  }
+
   // ---------- chat ----------
   async function askPage(chatId) {
     await loadDocuments();
@@ -1516,6 +1820,8 @@
       if (first === "result" && second) node = await resultPage(second);
       else if (first === "ask") node = await askPage(second);
       else if (first === "grade") node = await gradePage(second);
+      else if (first === "assistant") node = await assistantPage(second);
+      else if (first === "planner") node = await plannerPage(second);
       else if (routes[first]) node = await routes[first]();
       else node = h("div", { class: "page" }, h("div", { class: "card" }, empty("warn", "That page doesn't exist.", h("a", { class: "btn", href: "#/" }, "Go home"))));
     } catch (error) {

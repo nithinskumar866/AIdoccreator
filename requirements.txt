@@ -5,7 +5,13 @@ waitress==3.0.2
 gunicorn==23.0.0; sys_platform != "win32"
 
 # AI
-google-genai>=1.0,<2
+google-genai>=2.20,<4
+
+# Agents (LangGraph on LangChain's Gemini integration)
+langgraph==1.2.20
+langgraph-checkpoint-sqlite==3.1.3
+langchain-core>=1.7.5,<2
+langchain-google-genai==4.4.3
 
 # Documents
 python-docx==1.1.2

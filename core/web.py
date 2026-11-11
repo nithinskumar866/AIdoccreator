@@ -42,12 +42,22 @@ def _json_body() -> dict:
     return body if isinstance(body, dict) else {}
 
 
-def _submit(job_type: str, params: dict):
+def _submit(job_type: str, params: dict, extra: dict | None = None):
     settings: Settings = current_app.config["SETTINGS"]
     if _store().active_jobs() >= settings.max_queued_jobs:
         return jsonify(error="Too many tasks are waiting. Let some finish first."), 429
     job_id = current_app.config["RUNNER"].submit(job_type, params)
-    return jsonify(job_id=job_id), 202
+    return jsonify(job_id=job_id, **(extra or {})), 202
+
+
+def _agents():
+    return current_app.config["AGENTS"]
+
+
+def _queue_index(document_id: str) -> None:
+    """Prepare meaning search in the background; keyword search works until it's done."""
+    if _agents().search.embeddings is not None:
+        current_app.config["INDEXER"].submit("index_document", {"document_id": document_id})
 
 
 @api.get("/status")
@@ -62,13 +72,16 @@ def status():
                 "chats": len(store.list_chats()), "bank": store.bank_count()},
         question_types=services.QUESTION_TYPES,
         max_questions=services.MAX_QUESTIONS,
+        agents=_agents().model is not None,
+        embedding_model=settings.embedding_model,
     )
 
 
 # ---------- documents ----------
 @api.get("/documents")
 def list_documents():
-    return jsonify(documents=_store().list_documents())
+    status = _store().index_status(_agents().search.model)
+    return jsonify(documents=[d | {"index": status.get(d["id"])} for d in _store().list_documents()])
 
 
 @api.post("/documents")
@@ -93,6 +106,8 @@ def upload_documents():
         existing = _store().find_document(digest, role)
         document = existing or _store().add_document(name, role, extracted.kind, digest,
                                                      extracted.segments, extracted.pages)
+        if not existing and role != "answers":
+            _queue_index(document["id"])
         uploaded.append({k: document[k] for k in ("id", "name", "role", "kind", "chars", "pages", "created_at")}
                         | {"duplicate": bool(existing)})
     code = 200 if uploaded or not failed else 400
@@ -117,6 +132,16 @@ def update_document(doc_id: str):
     if not _store().update_document_role(doc_id, role):
         return jsonify(error="That document no longer exists."), 404
     return jsonify(ok=True)
+
+
+@api.post("/documents/<doc_id>/index")
+def index_document(doc_id: str):
+    if not _store().get_document(doc_id):
+        return jsonify(error="That document no longer exists."), 404
+    if _agents().search.embeddings is None:
+        return jsonify(error="Meaning search needs a Gemini API key."), 400
+    job_id = current_app.config["INDEXER"].submit("index_document", {"document_id": doc_id})
+    return jsonify(job_id=job_id), 202
 
 
 @api.delete("/documents/<doc_id>")
@@ -236,6 +261,79 @@ def regrade(result_id: str):
     return _submit("regrade_student", {"result_id": result_id, "student_id": student_id})
 
 
+@api.post("/results/<result_id>/second-opinion")
+def request_second_opinion(result_id: str):
+    result = _load_result(result_id)
+    if not result or result["type"] != "grading":
+        return jsonify(error="That grading no longer exists."), 404
+    body = _json_body()
+    return _submit("second_opinion", {"result_id": result_id,
+                                      "student_id": str(body.get("student_id") or "") or None,
+                                      "question_id": str(body.get("question_id") or "") or None})
+
+
+# ---------- agents ----------
+@api.get("/agents/threads")
+def list_threads():
+    kind = request.args.get("kind", "assistant")
+    if kind not in {"assistant", "planner"}:
+        return jsonify(error="Unknown kind."), 400
+    return jsonify(threads=_store().list_threads(kind))
+
+
+@api.get("/agents/threads/<thread_id>")
+def get_thread(thread_id: str):
+    thread = _store().get_thread(thread_id)
+    if not thread:
+        return jsonify(error="That conversation no longer exists."), 404
+    return jsonify(_agents().view(thread))
+
+
+@api.delete("/agents/threads/<thread_id>")
+def delete_thread(thread_id: str):
+    if not _agents().delete(thread_id):
+        return jsonify(error="That conversation no longer exists."), 404
+    return jsonify(ok=True)
+
+
+@api.post("/agents/assistant")
+def ask_assistant():
+    body = _json_body()
+    question = str(body.get("question") or "").strip()
+    if not question:
+        return jsonify(error="Type a question first."), 400
+    if len(question) > 4000:
+        return jsonify(error="That question is too long. Keep it under 4,000 characters."), 400
+    thread_id = str(body.get("thread_id") or "")
+    if thread_id:
+        thread = _store().get_thread(thread_id)
+        if not thread or thread["kind"] != "assistant":
+            return jsonify(error="That conversation no longer exists."), 404
+    else:
+        thread_id = _store().create_thread("assistant", _agents().title(question))
+    return _submit("assistant", {"thread_id": thread_id, "question": question}, {"thread_id": thread_id})
+
+
+@api.post("/agents/planner")
+def start_plan():
+    from .agents import planner
+
+    params = planner.validate(_json_body())
+    thread_id = _store().create_thread("planner", _agents().title(params["request"]))
+    return _submit("plan", params | {"thread_id": thread_id}, {"thread_id": thread_id})
+
+
+@api.post("/agents/planner/<thread_id>/resume")
+def resume_plan(thread_id: str):
+    from .agents import planner
+
+    thread = _store().get_thread(thread_id)
+    if not thread or thread["kind"] != "planner":
+        return jsonify(error="That plan no longer exists."), 404
+    decision = planner.validate_resume(_json_body())
+    return _submit("resume_plan", {"thread_id": thread_id, "decision": decision}, {"thread_id": thread_id})
+
+
 # ---------- question bank ----------
 @api.get("/bank")
 def list_bank():
@@ -325,18 +423,24 @@ def _hostname(value: str) -> str:
     return (urlsplit(f"//{value}").hostname or "").lower()
 
 
-def create_app(settings: Settings | None = None, ai=None) -> Flask:
+def create_app(settings: Settings | None = None, ai=None, agent_model=None, embeddings=None) -> Flask:
     settings = settings or Settings.from_env()
     app = Flask(__name__, root_path=str(BASE_DIR), template_folder="templates", static_folder="static")
     app.config["MAX_CONTENT_LENGTH"] = settings.max_upload_mb * 1024 * 1024
     app.config["SETTINGS"] = settings
 
+    if ai is None and agent_model is None and embeddings is None:  # the real app, not a test
+        from .agents.models import build_models
+        agent_model, embeddings = build_models(settings)
     if ai is None:
         ai = (GeminiClient(settings.api_key, settings.model, settings.ai_timeout_s,
                            settings.ai_max_retries, settings.ai_rpm)
               if settings.api_key else UnconfiguredAI())
     store = Store(settings.data_dir)
     service = Services(store, ai)
+    from .agents import Agents
+    agents = Agents(service, agent_model, embeddings, settings)
+    app.config["AGENTS"] = agents
     app.config["STORE"] = store
     app.config["SERVICES"] = service
     app.config["RUNNER"] = JobRunner(store, {
@@ -348,7 +452,13 @@ def create_app(settings: Settings | None = None, ai=None) -> Flask:
         "grade_answers": lambda params, progress: grading.grade_answers(service, params, progress),
         "regrade_student": lambda params, progress: grading.regrade_student(service, params, progress),
         "bank_assignment": lambda params, progress: bank.build_assignment(service, params, progress),
+        "assistant": agents.ask,
+        "plan": agents.plan,
+        "resume_plan": agents.resume_plan,
+        "second_opinion": agents.second_opinion,
     }, settings.job_workers)
+    # Its own single worker, so slow, paced indexing never holds up a teacher's task.
+    app.config["INDEXER"] = JobRunner(store, {"index_document": agents.index_document}, 1)
     app.register_blueprint(api)
 
     @app.before_request

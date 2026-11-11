@@ -32,6 +32,18 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL, content TEXT NOT NULL, sources TEXT NOT NULL, created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, created_at);
+CREATE TABLE IF NOT EXISTS embeddings (
+  document_id TEXT NOT NULL, chunk_id TEXT NOT NULL, model TEXT NOT NULL, vector BLOB NOT NULL,
+  PRIMARY KEY (document_id, chunk_id, model)
+);
+CREATE TABLE IF NOT EXISTS doc_index (
+  document_id TEXT NOT NULL, model TEXT NOT NULL, chunks INTEGER NOT NULL, embedded INTEGER NOT NULL,
+  status TEXT NOT NULL, error TEXT, updated_at REAL NOT NULL, PRIMARY KEY (document_id, model)
+);
+CREATE TABLE IF NOT EXISTS agent_threads (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL,
+  data TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS bank (
   id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, data TEXT NOT NULL,
   used INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL
@@ -49,6 +61,7 @@ class Store:
         self.path = data_dir / "documentor.sqlite3"
         with self._db() as db:
             db.executescript(SCHEMA)
+            db.execute("UPDATE doc_index SET status='partial' WHERE status='indexing'")
             db.execute(
                 "UPDATE jobs SET status='failed', error_code='interrupted', "
                 "error='DocuMentor restarted before this finished. Please run it again.' "
@@ -102,6 +115,8 @@ class Store:
 
     def delete_document(self, doc_id: str) -> bool:
         with self._db() as db:
+            db.execute("DELETE FROM embeddings WHERE document_id=?", (doc_id,))
+            db.execute("DELETE FROM doc_index WHERE document_id=?", (doc_id,))
             return db.execute("DELETE FROM documents WHERE id=?", (doc_id,)).rowcount > 0
 
     # Jobs
@@ -248,3 +263,55 @@ class Store:
     def bank_count(self) -> int:
         with self._db() as db:
             return db.execute("SELECT COUNT(*) FROM bank").fetchone()[0]
+
+    # Embeddings for meaning-based search
+    def get_vectors(self, doc_id: str, model: str) -> dict[str, bytes]:
+        with self._db() as db:
+            rows = db.execute("SELECT chunk_id, vector FROM embeddings WHERE document_id=? AND model=?",
+                              (doc_id, model)).fetchall()
+        return {r["chunk_id"]: r["vector"] for r in rows}
+
+    def add_vectors(self, doc_id: str, model: str, vectors: dict[str, bytes]) -> None:
+        with self._db() as db:
+            db.executemany("INSERT OR REPLACE INTO embeddings VALUES (?,?,?,?)",
+                           [(doc_id, chunk, model, blob) for chunk, blob in vectors.items()])
+
+    def set_index(self, doc_id: str, model: str, chunks: int, embedded: int, status: str,
+                  error: Optional[str] = None) -> None:
+        with self._db() as db:
+            db.execute("INSERT OR REPLACE INTO doc_index VALUES (?,?,?,?,?,?,?)",
+                       (doc_id, model, chunks, embedded, status, error, time.time()))
+
+    def index_status(self, model: str) -> dict[str, dict]:
+        with self._db() as db:
+            rows = db.execute("SELECT * FROM doc_index WHERE model=?", (model,)).fetchall()
+        return {r["document_id"]: {k: r[k] for k in ("chunks", "embedded", "status", "error")} for r in rows}
+
+    # Agent conversations and plans (their step-by-step state lives in the LangGraph checkpointer)
+    def create_thread(self, kind: str, title: str, data: Optional[dict] = None) -> str:
+        thread_id, now = new_id(), time.time()
+        with self._db() as db:
+            db.execute("INSERT INTO agent_threads VALUES (?,?,?,?,?,?,?)",
+                       (thread_id, kind, title, "new", json.dumps(data or {}), now, now))
+        return thread_id
+
+    def get_thread(self, thread_id: str) -> Optional[dict]:
+        with self._db() as db:
+            row = db.execute("SELECT * FROM agent_threads WHERE id=?", (thread_id,)).fetchone()
+        return {**dict(row), "data": json.loads(row["data"])} if row else None
+
+    def update_thread(self, thread_id: str, status: Optional[str] = None, data: Optional[dict] = None) -> None:
+        with self._db() as db:
+            db.execute("UPDATE agent_threads SET status=COALESCE(?,status), data=COALESCE(?,data), "
+                       "updated_at=? WHERE id=?",
+                       (status, json.dumps(data) if data is not None else None, time.time(), thread_id))
+
+    def list_threads(self, kind: str) -> list[dict]:
+        with self._db() as db:
+            rows = db.execute("SELECT id,kind,title,status,created_at,updated_at FROM agent_threads "
+                              "WHERE kind=? ORDER BY updated_at DESC", (kind,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_thread(self, thread_id: str) -> bool:
+        with self._db() as db:
+            return db.execute("DELETE FROM agent_threads WHERE id=?", (thread_id,)).rowcount > 0

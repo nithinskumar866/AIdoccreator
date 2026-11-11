@@ -43,7 +43,8 @@ class GeminiClient:
         self._next_slot = 0.0
         self._client = genai.Client(
             api_key=api_key,
-            http_options=genai.types.HttpOptions(timeout=timeout_s * 1000),
+            # v1beta carries the "-latest" model aliases; newer SDKs default to v1, which doesn't.
+            http_options=genai.types.HttpOptions(api_version="v1beta", timeout=timeout_s * 1000),
         )
 
     def _pace(self, on_wait: Waiter) -> None:

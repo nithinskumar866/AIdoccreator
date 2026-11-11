@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "gemini-flash-lite-latest"
+DEFAULT_EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 
 def _int(name: str, default: int) -> int:
@@ -32,6 +33,9 @@ class Settings:
     ai_rpm: int = 10
     job_workers: int = 2
     max_queued_jobs: int = 20
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embeds_per_minute: int = 90  # the free tier allows 100 texts a minute
+    agent_max_steps: int = 6
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -47,4 +51,8 @@ class Settings:
             ai_timeout_s=_int("GEMINI_TIMEOUT_SECONDS", 60),
             ai_max_retries=_int("GEMINI_MAX_RETRIES", 5),
             ai_rpm=_int("GEMINI_REQUESTS_PER_MINUTE", 10),
+            embedding_model=os.getenv("GEMINI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip()
+            or DEFAULT_EMBEDDING_MODEL,
+            embeds_per_minute=_int("GEMINI_EMBEDS_PER_MINUTE", 90),
+            agent_max_steps=_int("DOCUMENTOR_AGENT_MAX_STEPS", 6),
         )

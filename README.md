@@ -8,6 +8,10 @@ finds off-topic homework questions, writes new assignments with answer keys, cat
 in notes, keeps a question bank, and suggests marks for students' answers. Every suggestion
 shows its reason and the textbook passage behind it, and nothing changes until you accept it.
 
+Three **agents built with LangGraph** do the jobs that need several steps: a teacher assistant
+that looks things up across all your work, an assignment planner that drafts, checks and revises
+a test before asking for your approval, and a second-opinion agent that re-checks unclear marks.
+
 It runs on your own computer, with no account and no login.
 
 ![The grading screen: class scores and the average score for each question](screenshots/11-grading-class.png)
@@ -17,6 +21,7 @@ It runs on your own computer, with no account and no login.
 - [What it does](#what-it-does)
 - [Workflow](#workflow): how the tools fit together
 - [Architecture](#architecture): the parts of the app and how a task runs
+- [Agents](#agents): what the LangGraph agents do, their graphs, and hybrid search
 - [Quick start](#quick-start)
 - [A full walkthrough](#a-full-walkthrough): one teaching unit from start to finish, with screenshots
 - [How it keeps you in control](#how-it-keeps-you-in-control)
@@ -33,6 +38,9 @@ It runs on your own computer, with no account and no login.
 | **Question bank** | Your best questions saved, tagged and reused, picked by hand or automatically |
 | **Grade answers** | Suggested marks and feedback for a whole class, which you confirm one by one or in bulk |
 | **Ask** | A chat about your documents, with follow-up questions and cited answers |
+| **Teacher assistant** (agent) | Answers questions about your documents, bank, homework and gradings by deciding what to look up, and shows every step |
+| **Plan an assignment** (agent) | Turns "a 10-mark quiz on clustering" into a checked draft from your bank plus new questions, then waits for your approval |
+| **Second opinion** (agent) | Re-checks unclear marks by searching the textbook itself, and explains when it disagrees |
 | **Exports** | Word documents with real headings and tables, and grades as a spreadsheet (CSV) |
 
 It reads `.docx`, `.pdf`, `.txt` and `.md` files. Long documents are searched in full rather
@@ -51,6 +59,8 @@ flowchart TD
     B --> D["Create homework"]
     B --> E["Review notes"]
     B --> F["Ask your documents"]
+    B --> AS["Teacher assistant (agent)"]
+    B --> PL["Plan an assignment (agent)"]
 
     C --> R["Review each question<br/>accept, reject or edit suggestions"]
     D --> R
@@ -74,6 +84,14 @@ flowchart TD
     RN --> X3["Export corrected notes to Word"]
 
     F --> FA["Cited answers<br/>with follow-up questions"]
+
+    AS --> ASA["Answers built from the steps it chose<br/>documents, bank, homework, gradings"]
+    PL --> PD["Draft: bank questions plus new ones,<br/>checked and revised by the agent"]
+    PD --> PR{"Your review"}
+    PR -- "ask for changes" --> PD
+    PR -- "approve" --> R
+    G -. "unclear marks" .-> SO["Second opinion (agent)<br/>advice beside the mark"]
+    SO -.-> GR
 ```
 
 Every result is saved to **History** as you go, so you can reopen it, keep reviewing and export
@@ -83,7 +101,8 @@ again later.
 
 DocuMentor is one small Python web app that runs on your computer. The page in your browser
 talks to it through a JSON API. Long AI tasks run in the background while the page shows their
-progress. Only passages from your documents leave your computer, sent to Google Gemini.
+progress. Only passages from your documents, and students' answers when grading, leave your
+computer, sent to Google Gemini.
 
 ```mermaid
 flowchart TB
@@ -96,17 +115,20 @@ flowchart TB
         API["JSON API<br/>core/web.py"]
         Jobs["Background jobs<br/>core/jobs.py, 2 workers"]
 
-        subgraph Features["Features"]
+        subgraph Features["Fixed pipelines"]
             Svc["core/services.py<br/>check, create, answer key,<br/>notes review, chat"]
             Grade["core/grading.py<br/>match answers, suggest marks,<br/>class summary"]
             Bank["core/bank.py<br/>save, edit, pick,<br/>build assignments"]
         end
 
+        Agents["core/agents/<br/>LangGraph agents<br/>(see Agents below)"]
+        Hybrid["core/hybrid.py<br/>BM25 + embeddings"]
+
         Docs["core/documents.py<br/>read .docx .pdf .txt .md"]
         Ret["core/retrieval.py<br/>passages and BM25 search"]
         AI["core/ai.py<br/>pacing, timeouts, retries,<br/>JSON schemas"]
         Export["core/export.py<br/>Word and CSV"]
-        Store[("SQLite, core/store.py<br/>documents, jobs, results,<br/>chats, question bank")]
+        Store[("SQLite, core/store.py<br/>documents, jobs, results, chats,<br/>question bank, embeddings")]
     end
 
     Gemini["Google Gemini API"]
@@ -119,6 +141,9 @@ flowchart TB
     Features <--> Store
     Features --> AI -- "passages and answers<br/>as fenced data" --> Gemini
     API -- "download" --> Export --> Store
+    Jobs --> Agents
+    Agents --> Hybrid --> Ret
+    Agents -- "LangChain" --> Gemini
 ```
 
 ### What happens when you grade a class
@@ -162,6 +187,126 @@ sequenceDiagram
     API->>DB: Save the decision
 ```
 
+## Agents
+
+Most of DocuMentor is a set of **fixed pipelines**: the code decides every step, and Gemini is
+asked one precise question at a time. That's the right design for checking and grading, where
+results have to be predictable and uploaded text must never steer anything.
+
+Three jobs need more than one step, so they are **agents**, built as LangGraph state graphs on
+LangChain's Gemini integration:
+
+| Agent | What the model decides | Tools | Can it change your data? |
+|---|---|---|---|
+| **Teacher assistant** | Which tool to call, with what query, and when it has enough to answer | All 7 read-only tools | No. It can only read |
+| **Assignment planner** | How to read the request, which bank questions to use, what to write | Bank search and document search, called by its own steps | Only after you approve the draft |
+| **Second opinion** | What to search for in the textbook, then the mark it would give | Document search | No. Its opinion is advice shown beside your mark |
+
+How the agents are wired:
+
+```mermaid
+flowchart TB
+    Pages["Assistant and planner pages,<br/>Second opinion buttons"] -- "/api/agents/..." --> Jobs["Background jobs"]
+    Jobs --> Graphs
+
+    subgraph Graphs["LangGraph graphs, core/agents/"]
+        A1["Teacher assistant"]
+        A2["Assignment planner"]
+        A3["Second opinion"]
+    end
+
+    Graphs --> LLM["ChatGoogleGenerativeAI<br/>tool calls, structured output,<br/>rate limiter, retries"]
+    Graphs --> Tools["Read-only tools<br/>core/agents/tools.py"]
+    Graphs -- "memory and paused plans" --> CK[("agents.sqlite3<br/>LangGraph checkpoints")]
+    Tools --> Hybrid["Hybrid search<br/>core/hybrid.py"]
+    Tools --> Store[("documentor.sqlite3<br/>library, bank, results,<br/>embeddings")]
+    A2 -- "saves only after you approve" --> Store
+    LLM --> Gemini["Google Gemini"]
+    Indexer["Index worker<br/>after each upload"] -- "embeddings" --> Gemini
+    Indexer --> Store
+```
+
+**The tools** in [core/agents/tools.py](core/agents/tools.py): search documents, list
+documents, search the question bank, list saved work, open a homework, open a grading summary,
+and read one student's answers. Everything a tool returns is marked as data from the teacher's
+files, not instructions.
+
+### Teacher assistant: a tool-calling loop
+
+The model calls tools, reads what comes back, and either searches again or answers. A step limit
+stops runaway loops, and a SQLite checkpointer keeps the conversation, so follow-up questions
+work.
+
+```mermaid
+flowchart LR
+    S((start)) --> A["agent<br/>Gemini with 7 read-only tools"]
+    A -- "tool calls" --> T["tools<br/>LangGraph ToolNode"]
+    T --> A
+    A -- "answer, or step limit reached" --> E((end))
+    CK[("checkpointer<br/>agents.sqlite3")] -. "conversation memory" .- A
+```
+
+### Assignment planner: plan, check, revise, then wait for you
+
+The model makes the judgement calls: reading the request, choosing questions, writing new ones.
+Code does the counting and checking: the number of questions, marks (which code balances to the
+requested total), topics, recent use and near-duplicates, both by shared words and by meaning.
+The planner fixes its own problems up to twice. Then a LangGraph `interrupt` pauses the graph,
+and the checkpointer holds it until you approve, ask for changes or cancel, even across a
+restart.
+
+```mermaid
+flowchart LR
+    S((start)) --> U["understand<br/>request to spec"]
+    U --> G["gather<br/>bank and recent use"]
+    G --> SEL["select<br/>bank questions and plans"]
+    SEL --> W["write<br/>new questions from passages,<br/>balance marks"]
+    W --> C{"check<br/>count, marks, topics,<br/>duplicates"}
+    C -- "problems, under 2 tries" --> SEL
+    C -- "fine, or 2 tries used" --> R[/"review<br/>interrupt: waits for you"/]
+    R -- "approve" --> SV["save as homework"] --> E((end))
+    R -- "ask for changes" --> F["apply feedback"] --> SEL
+    R -- "cancel" --> X["cancel"] --> E
+```
+
+### Second opinion: research, then decide
+
+For flagged, partly right or in-between marks, the agent researches the textbook with up to three
+searches of its own, then returns a structured verdict: a mark, whether it agrees, and why. The
+mark is capped at the question's maximum and stored beside yours. It only changes your mark if
+you click **Use**.
+
+```mermaid
+flowchart LR
+    S((start)) --> R["research<br/>Gemini with document search"]
+    R -- "search" --> T["tools"]
+    T --> R
+    R -- "enough, or 3 searches" --> D["decide<br/>structured verdict"]
+    D --> E((end))
+```
+
+### Hybrid search
+
+The agents search by **keywords** (BM25) and by **meaning** (Gemini embeddings,
+`gemini-embedding-001` at 768 dimensions), and combine both rankings with Reciprocal Rank Fusion.
+Meaning search finds a passage about "K-means clustering" when you ask about "grouping students'
+data", even with no word in common.
+
+Documents are embedded in the background after upload, on their own worker. Gemini's free tier
+allows 100 embedded passages a minute, so indexing is paced to 90. A long textbook takes a few
+minutes, and the Library shows its progress. Until a document is ready, or if embedding fails,
+search quietly uses keywords alone. Students' work isn't embedded.
+
+### Limits
+
+- Agents make several Gemini calls per task, paced to your requests-per-minute setting, so an
+  assistant answer typically takes 20 to 40 seconds.
+- The near-duplicate check compares meaning with a cut-off of 0.94, measured on real questions.
+  With a very short textbook, the planner can still write questions that overlap without crossing
+  it. Untick them, or ask for changes.
+- The second opinion is a second AI judgement, not a correct answer. It is most useful where you
+  were unsure anyway.
+
 ## Quick start
 
 You need Python 3.10 or newer and a [Gemini API key](https://aistudio.google.com/apikey).
@@ -201,10 +346,10 @@ the marks, feedback and suggestions shown are what the app actually produced.
 
 ### 1. Start the app and add your material
 
-The home screen lists every tool. Until you add a document, it also shows the steps to get
-started.
+The home screen lists every tool, the two agents you can start from it, and your recent work.
+Until you add a document, it also shows the steps to get started.
 
-![Home screen with the six tools and a getting-started checklist](screenshots/01-home.png)
+![Home screen with the six tools, the agents and recent work](screenshots/01-home.png)
 
 Drop files into the **Library**. Each file's type (textbook, notes, homework or student work) is
 guessed from its name, and you can change it. Only the extracted text is kept; the file itself
@@ -328,6 +473,35 @@ Reopen any of them to keep reviewing or to export again.
 
 ![History listing a grading, new homework, a notes review and a homework check](screenshots/14-history.png)
 
+### 10. Let the agents help
+
+These screenshots come from a second run of the same sample unit, with two students.
+
+**Teacher assistant.** Asked which question Ravi Kumar struggled with most, the assistant chose
+its own steps: it listed the gradings, read Ravi's answers, opened the homework, then searched
+the textbook. Asked about questions on "grouping data without labels", its first searches found
+nothing that matched, so it tried "unsupervised", "labels" and "cluster", then listed the whole
+bank before answering. Every step and what it returned can be expanded.
+
+![The teacher assistant answering two questions, with its steps expanded](screenshots/17-assistant.png)
+
+**Plan an assignment.** The request was *"A 10-mark mixed quiz with 4 questions covering supervised
+and unsupervised learning."* The timeline shows each step: it understood the request, searched the
+bank, chose 2 bank questions and planned 2 new ones, wrote them from the textbook, and checked the
+draft. The draft then waits for you: untick questions, ask for changes in plain words, approve or
+cancel. Nothing is saved until you approve.
+
+![The assignment planner's timeline and draft, waiting for review](screenshots/18-planner.png)
+
+**Second opinion.** On Ravi's answer *"Automatically maybe"* the first mark was 1 of 2. The
+second-opinion agent searched the textbook for how algorithms improve, decided the key idea was
+there, and suggested 2, with its reasoning and the passage it used. The mark stays 1 until you
+click **Use 2**.
+
+![A second opinion disagreeing with a mark, beside the original mark](screenshots/19-second-opinion.png)
+
+The Library shows which documents are ready for meaning search.
+
 ### Dark mode and phones
 
 The theme follows your system, or you can switch it from the sidebar. Every screen works on a
@@ -350,6 +524,8 @@ phone.
   marks, is flagged for you to decide.
 - **Honest about gaps.** Content that's missing from the textbook isn't reported as wrong, and the
   chat says when your documents don't contain an answer.
+- **Agents can read, not act.** Their tools are read-only. The planner saves only after your
+  approval, and a second opinion never changes a mark by itself.
 
 ## Settings
 
@@ -359,7 +535,10 @@ Set these in `.env`. See [.env.example](.env.example) for the full list.
 |---|---|---|
 | `GEMINI_API_KEY` | none | Required for the AI tools |
 | `GEMINI_MODEL` | `gemini-flash-lite-latest` | Change this if a model is retired or slow for your key |
-| `GEMINI_REQUESTS_PER_MINUTE` | `10` | Paces calls to stay inside your quota |
+| `GEMINI_REQUESTS_PER_MINUTE` | `10` | Paces calls to stay inside your quota, agents included |
+| `GEMINI_EMBEDDING_MODEL` | `models/gemini-embedding-001` | The model for meaning search |
+| `GEMINI_EMBEDS_PER_MINUTE` | `90` | Paces background indexing; the free tier allows 100 |
+| `DOCUMENTOR_AGENT_MAX_STEPS` | `6` | How many tool rounds the assistant may take per question |
 | `PORT` | `10000` | Local port |
 | `DOCUMENTOR_DATA_DIR` | `data` | Where your library and results are saved |
 
@@ -368,12 +547,13 @@ Set these in `.env`. See [.env.example](.env.example) for the full list.
 - **No login, local only.** The app only listens on this computer and refuses other hostnames and
   cross-site requests. Setting `DOCUMENTOR_ALLOW_REMOTE=1` lets anyone who can reach it use your
   documents and API quota, so don't do that on a network you don't trust.
-- **What leaves your computer:** passages from your documents, and students' answers when
-  grading, are sent to Google's Gemini API. Check Google's data terms before using sensitive
-  material.
-- **What is stored:** extracted text, results and the question bank, in
-  `data/documentor.sqlite3`. Uploaded files aren't kept. Students' work is stored the same way,
-  with their names. Delete documents and results in the app at any time.
+- **What leaves your computer:** passages from your documents, students' answers when grading or
+  getting a second opinion, and what the assistant looks up for you are sent to Google's Gemini
+  API. Check Google's data terms before using sensitive material.
+- **What is stored:** extracted text, results, the question bank and search embeddings in
+  `data/documentor.sqlite3`, and agent conversations and plans in `data/agents.sqlite3`. Uploaded
+  files aren't kept. Students' work is stored the same way, with their names. Delete documents,
+  results and conversations in the app at any time.
 - **Never commit `.env`.** It is ignored by git.
 
 ## Project layout
@@ -387,6 +567,8 @@ core/retrieval.py   Splits documents and finds relevant passages
 core/services.py    Homework checking and writing, notes review, chat, and the review logic
 core/grading.py     Matching and grading students' answers, and the class summary
 core/bank.py        The question bank and assignments built from it
+core/hybrid.py      Hybrid search: BM25 plus embeddings, with Reciprocal Rank Fusion
+core/agents/        LangGraph agents: assistant, planner, second opinion, tools, models
 core/export.py      Word export
 core/jobs.py        Background tasks and progress
 core/store.py       SQLite storage
@@ -399,7 +581,9 @@ tests/              Test suite
 
 ## Tests
 
-The tests use a scripted AI, so they are fast and spend no quota.
+The tests use a scripted AI and a scripted LangChain chat model and embeddings, so they are
+fast and spend no quota. They cover the agents' tool loops, the planner's revise and approval
+paths, step limits, and that uploaded text stays fenced as data.
 
 ```bash
 pip install -r requirements-dev.txt
