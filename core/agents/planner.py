@@ -104,7 +104,7 @@ def build(model: Any, svc: Any, search: Any, checkpointer: Any):
                                 "specification. Prefer topic names from KNOWN TOPICS when they match.",
                           data.block("KNOWN TOPICS", json.dumps(topics)) + "\n\n"
                           + data.block("TEACHER REQUEST", state["request"]))
-        spec_d = spec.model_dump()
+        spec_d = fill_from_request(spec.model_dump(), state["request"], topics)
         spec_d["difficulty"] = spec_d["difficulty"] if spec_d["difficulty"] in DIFFICULTIES + ["mixed"] else "mixed"
         parts = [f"{spec_d['question_count']} questions" if spec_d["question_count"] else None,
                  f"{spec_d['total_marks']} marks" if spec_d["total_marks"] else None,
@@ -161,9 +161,13 @@ def build(model: Any, svc: Any, search: Any, checkpointer: Any):
         ids = list(dict.fromkeys(i for i in choice.use_bank_ids if i in known))
         new = [p.model_dump() for p in choice.write_new][:MAX_QUESTIONS]
         why = summary(choice.reasoning)
-        return {"selection": {"bank_ids": ids, "write_new": new, "reasoning": why},
-                "log": _log(state, "Chose questions" if not state.get("items") else "Revised the choice",
-                            f"{len(ids)} from the bank, {len(new)} to write." + (f" {why}" if why else ""))}
+        log = _log(state, "Chose questions" if not state.get("items") else "Revised the choice",
+                   f"{len(ids)} from the bank, {len(new)} to write." + (f" {why}" if why else ""))
+        added = fill_gap(state["spec"], ids, new)
+        if added:
+            log.append({"step": "Filled the gap", "detail": f"Planned {added} more question"
+                        f"{'s' if added != 1 else ''} to reach the number asked for"})
+        return {"selection": {"bank_ids": ids, "write_new": new, "reasoning": why}, "log": log}
 
     def write(state: State) -> dict:
         selection = state["selection"]
@@ -325,6 +329,53 @@ def build(model: Any, svc: Any, search: Any, checkpointer: Any):
     graph.add_edge("save", END)
     graph.add_edge("cancel", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+def fill_from_request(spec: dict, request: str, known_topics: list[str]) -> dict:
+    """Take the count, total marks and topics straight from the teacher's words when the model
+    missed them. Smaller models often leave these out."""
+    text = request.lower()
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+             "nine": 9, "ten": 10, "twelve": 12, "fifteen": 15, "twenty": 20}
+    number = r"(\d{1,3}|" + "|".join(words) + r")"
+    value = lambda m: int(words.get(m, m)) if m else None  # noqa: E731
+    if not spec.get("total_marks"):
+        found = re.search(number + r"[\s-]*marks?\b", text)
+        spec["total_marks"] = value(found.group(1)) if found else None
+    if not spec.get("question_count"):
+        found = re.search(number + r"\s+(?:\w+\s+){0,2}questions?\b", text)
+        spec["question_count"] = value(found.group(1)) if found else None
+    if not spec.get("topics"):
+        # Whole words only: "supervised learning" must not match inside "unsupervised learning".
+        spec["topics"] = [t for t in known_topics
+                          if re.search(rf"(?<![a-z]){re.escape(t.lower())}(?![a-z])", text)]
+    if spec.get("difficulty") == "mixed":
+        for level in DIFFICULTIES:
+            if re.search(rf"\b(mostly |all )?{level}\b", text):
+                spec["difficulty"] = level
+                break
+    if not spec.get("avoid_recent") and re.search(r"\b(avoid\w*|not|no|without|skip\w*|exclud\w*)\b.{0,30}\b(recent|used|last|previous)", text):
+        spec["avoid_recent"] = True
+    return spec
+
+
+def fill_gap(spec: dict, bank_ids: list[str], plans: list[dict]) -> int:
+    """Plan questions to write when the model's choice falls short of the number asked for,
+    and trim it when it goes over. Returns how many were added."""
+    target = spec.get("question_count")
+    if not target and spec.get("total_marks"):
+        target = max(1, round(spec["total_marks"] / 3))
+    target = min(target or 5, MAX_QUESTIONS)
+    while len(bank_ids) + len(plans) > target:
+        (plans or bank_ids).pop()
+    missing = target - len(bank_ids) - len(plans)
+    topics = spec.get("topics") or ["any topic in the textbook"]
+    level = spec.get("difficulty") if spec.get("difficulty") in DIFFICULTIES else None
+    mix = ["easy", "medium", "hard"]
+    for n in range(missing):
+        plans.append({"topic": topics[n % len(topics)], "difficulty": level or mix[n % 3], "marks": 2,
+                      "question_type": "short answer", "focus": "a different idea from the other questions"})
+    return max(missing, 0)
 
 
 def summary(text: str, limit: int = 220) -> str:

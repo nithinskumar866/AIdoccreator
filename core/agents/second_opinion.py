@@ -78,14 +78,21 @@ def build(model: Any, ctx: ToolContext):
     return graph.compile()
 
 
-def borderline(entry: dict, maximum: float) -> bool:
-    """Worth a second look: flagged, partly right, or a mark that isn't clearly all or nothing."""
+def borderline(entry: dict, maximum: float, answer_key: str = "") -> bool:
+    """Worth a second look: flagged, partly right, a mark between nothing and full, or a zero
+    for an answer that uses words from the answer key (it may be harsh)."""
+    from ..retrieval import tokenize
+
     if entry.get("second_opinion") or not entry["graded"] or not entry["answer"].strip():
         return False
     if entry["flagged"] or entry["verdict"] == "partial":
         return True
     mark = entry["mark"] if entry["decision"] == "accepted" else entry["suggested"]
-    return mark is not None and 0 < mark < maximum
+    if mark is None:
+        return False
+    if mark == 0 and answer_key:
+        return bool(set(tokenize(entry["answer"])) & set(tokenize(answer_key)))
+    return 0 < mark < maximum
 
 
 def review(model: Any, make_ctx: Callable[[], ToolContext], store: Any, params: dict,
@@ -103,7 +110,7 @@ def review(model: Any, make_ctx: Callable[[], ToolContext], store: Any, params: 
             if params.get("question_id"):
                 if entry["question_id"] == params["question_id"] and entry["graded"]:
                     targets.append((student, entry))
-            elif borderline(entry, questions[entry["question_id"]]["marks"]):
+            elif borderline(entry, questions[entry["question_id"]]["marks"], questions[entry["question_id"]]["answer"]):
                 targets.append((student, entry))
     if not targets:
         raise ServiceError("There are no marked answers that need a second look.")

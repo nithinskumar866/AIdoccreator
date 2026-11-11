@@ -186,11 +186,18 @@ def plan_setup(client, model):
              "write_new": [{"topic": "Unsupervised learning", "difficulty": "easy", "marks": 2, "focus": "k-means"},
                            {"topic": "Unsupervised learning", "difficulty": "medium", "marks": 2, "focus": "PCA"}]},
         ],
-        "NewQuestions": lambda _v: {"questions": [
-            {"text": "1. What does K-means do?", "answer": "Groups data.", "topic": "Unsupervised learning",
-             "difficulty": "easy", "marks": 2, "source_ids": ["P1", "P99"]},
-            {"text": "What is PCA for?", "answer": "Reducing dimensions.", "topic": "Unsupervised learning",
-             "difficulty": "medium", "marks": 2, "source_ids": []}]},
+        "NewQuestions": [
+            {"questions": [  # first try: two questions that ask the same thing
+                {"text": "What does the K-means algorithm do with data?", "answer": "Groups it.",
+                 "topic": "Unsupervised learning", "difficulty": "easy", "marks": 2},
+                {"text": "What does the K-means algorithm do with the data?", "answer": "Groups it.",
+                 "topic": "Unsupervised learning", "difficulty": "medium", "marks": 2}]},
+            {"questions": [
+                {"text": "1. What does K-means do?", "answer": "Groups data.", "topic": "Unsupervised learning",
+                 "difficulty": "easy", "marks": 2, "source_ids": ["P1", "P99"]},
+                {"text": "What is PCA for?", "answer": "Reducing dimensions.", "topic": "Unsupervised learning",
+                 "difficulty": "medium", "marks": 2, "source_ids": []}]},
+        ],
     }
     return book, bank_ids
 
@@ -205,9 +212,10 @@ def test_planner_drafts_checks_revises_and_waits_for_approval(agent_client, mode
     assert plan["status"] == "review" and plan["result_id"] is None
     steps = [entry["step"] for entry in plan["log"]]
     assert steps[:3] == ["Understood the request", "Searched the question bank", "Chose questions"]
+    assert "Filled the gap" in steps  # the model chose 1 of 3 questions; code planned the rest
     assert "Revised the choice" in steps  # the first draft failed its own checks
     first_check = next(e for e in plan["log"] if e["step"] == "Checked the draft")
-    assert "1 questions; 3 were asked for" in first_check["detail"]
+    assert "Questions 2 and 3 test almost the same thing" in first_check["detail"]
     assert [i["bank_id"] for i in plan["items"]] == [bank_ids[0], None, None]  # invented id dropped
     assert plan["items"][1]["original"] == "What does K-means do?"
     assert [s["id"] for s in plan["items"][1]["sources"]] == ["P1"]
@@ -246,6 +254,42 @@ def test_planner_takes_feedback_and_can_be_cancelled(agent_client, model):
     assert wait_job(agent_client, cancel)["status"] == "done"
     assert agent_client.get(f"/api/agents/threads/{thread_id}").json["status"] == "cancelled"
     assert agent_client.post("/api/agents/planner", json={"request": "quiz"}).status_code == 400
+
+
+def test_planner_reads_numbers_and_topics_from_the_request_when_the_model_misses_them():
+    from core.agents.planner import fill_from_request, fill_gap
+
+    spec = {"total_marks": None, "question_count": None, "topics": [], "difficulty": "mixed", "avoid_recent": False}
+    filled = fill_from_request(spec, "A 12-mark quiz on unsupervised learning with 4 short questions, mostly "
+                                     "medium, avoiding questions I used recently.",
+                               ["Supervised Learning", "Unsupervised Learning"])
+    assert filled["total_marks"] == 12 and filled["question_count"] == 4
+    assert filled["topics"] == ["Unsupervised Learning"] and filled["difficulty"] == "medium"
+    assert filled["avoid_recent"] is True
+    words = fill_from_request(dict(spec, total_marks=None, question_count=None, topics=[]),
+                              "five questions worth twenty marks", [])
+    assert (words["question_count"], words["total_marks"]) == (5, 20)
+    kept = fill_from_request({"total_marks": 10, "question_count": 2, "topics": ["PCA"], "difficulty": "hard"},
+                             "a 30-mark test with 9 questions", ["PCA"])
+    assert (kept["total_marks"], kept["question_count"]) == (10, 2)  # the model's reading wins
+
+    plans = []
+    assert fill_gap({"question_count": 4, "topics": ["A", "B"], "difficulty": "hard"}, ["b1"], plans) == 3
+    assert [(p["topic"], p["difficulty"]) for p in plans] == [("A", "hard"), ("B", "hard"), ("A", "hard")]
+    ids, plans = ["b1", "b2", "b3"], [{"topic": "x"}]
+    assert fill_gap({"question_count": 2}, ids, plans) == 0 and (ids, plans) == (["b1", "b2"], [])
+    assert fill_gap({"total_marks": 12}, [], plans) == 4  # about 3 marks a question
+
+
+def test_tools_fall_back_to_the_newest_item_for_a_made_up_id(agent_client, model, ai):
+    rid = grading(agent_client, ai)
+    model.turns = [tool_call("get_grading_summary", result_id="latest grading id"),
+                   tool_call("get_homework", result_id="latest"), AIMessage("Done.")]
+    response = agent_client.post("/api/agents/assistant", json={"question": "How did the class do?"})
+    assert wait_job(agent_client, response)["status"] == "done"
+    steps = agent_client.get(f"/api/agents/threads/{response.json['thread_id']}").json["messages"][-1]["steps"]
+    assert "this is the newest one" in steps[0]["result"] and rid in steps[0]["result"]
+    assert "What is supervised learning?" in steps[1]["result"]
 
 
 def test_planner_balances_marks_in_code_and_keeps_reasoning_short():
@@ -288,6 +332,18 @@ def grading(client, ai):
     job = wait_job(client, client.post("/api/jobs/grade_answers", json={
         "result_id": homework["output"]["result_id"], "student_ids": [student]}))
     return job["output"]["result_id"]
+
+
+def test_harsh_zeros_count_as_unclear_but_blank_or_unrelated_answers_do_not():
+    from core.agents.second_opinion import borderline
+
+    base = {"graded": True, "flagged": False, "decision": "pending", "verdict": "incorrect"}
+    key = "Supervised learning uses labeled data."
+    assert borderline({**base, "answer": "labeled maybe", "suggested": 0}, 3, key)
+    assert not borderline({**base, "answer": "no idea", "suggested": 0}, 3, key)
+    assert not borderline({**base, "answer": " ", "suggested": 0}, 3, key)
+    assert not borderline({**base, "answer": "labeled data", "suggested": 3, "verdict": "correct"}, 3, key)
+    assert borderline({**base, "answer": "labels", "suggested": 1.5}, 3, key)
 
 
 def test_second_opinion_researches_and_advises_without_changing_marks(agent_client, model, ai):

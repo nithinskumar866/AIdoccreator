@@ -12,7 +12,8 @@ Three **agents built with LangGraph** do the jobs that need several steps: a tea
 that looks things up across all your work, an assignment planner that drafts, checks and revises
 a test before asking for your approval, and a second-opinion agent that re-checks unclear marks.
 
-It runs on your own computer, with no account and no login.
+It runs on your own computer, with no account and no login. It uses Google Gemini by default, or
+your own models through Ollama, for example on a RunPod GPU.
 
 ![The grading screen: class scores and the average score for each question](screenshots/11-grading-class.png)
 
@@ -22,7 +23,7 @@ It runs on your own computer, with no account and no login.
 - [Workflow](#workflow): how the tools fit together
 - [Architecture](#architecture): the parts of the app and how a task runs
 - [Agents](#agents): what the LangGraph agents do, their graphs, and hybrid search
-- [Quick start](#quick-start)
+- [Quick start](#quick-start) · [Run on your own GPU](#run-on-your-own-gpu-ollama-or-runpod)
 - [A full walkthrough](#a-full-walkthrough): one teaching unit from start to finish, with screenshots
 - [How it keeps you in control](#how-it-keeps-you-in-control)
 - [Settings](#settings) · [Privacy and security](#privacy-and-security) · [Project layout](#project-layout) · [Tests](#tests)
@@ -527,6 +528,59 @@ phone.
 - **Agents can read, not act.** Their tools are read-only. The planner saves only after your
   approval, and a second opinion never changes a mark by itself.
 
+## Run on your own GPU (Ollama or RunPod)
+
+Every feature, agents included, can run on models you host with [Ollama](https://ollama.com)
+instead of Gemini: on your own machine, or on a rented GPU such as RunPod. Your documents and
+students' work then go to your server instead of Google, and there are no free-tier limits.
+
+1. On the GPU machine, pull a chat model and an embedding model:
+
+   ```bash
+   ollama pull llama3.1:8b
+   ollama pull nomic-embed-text
+   ```
+
+   On RunPod, expose port 11434. The pod's address looks like
+   `https://<pod-id>-11434.proxy.runpod.net`.
+2. Add to `.env` and restart DocuMentor:
+
+   ```bash
+   LLM_PROVIDER=ollama
+   OLLAMA_BASE_URL=https://<pod-id>-11434.proxy.runpod.net
+   OLLAMA_MODEL=llama3.1:8b
+   OLLAMA_EMBED_MODEL=nomic-embed-text
+   ```
+
+   The sidebar then shows the model's name. Set `LLM_PROVIDER=gemini` to switch back.
+
+How it connects: the fixed pipelines call Ollama's own `/api/chat` with a JSON schema, which
+constrains the answer to valid JSON. The agents use LangChain's `ChatOllama` for tool calls and
+structured output. Meaning search uses `nomic-embed-text`. Each request asks for a 16,384-token
+context (`OLLAMA_NUM_CTX`), because Ollama otherwise cuts long prompts to its default size
+without telling you.
+
+**Choosing a model.** The app needs tool calling and reliable JSON. We tested `llama3.1:8b` on a
+RunPod GPU against Gemini on the same sample unit:
+
+| Feature | `llama3.1:8b` | Gemini (`gemini-flash-lite-latest`) |
+|---|---|---|
+| Check homework, create homework, chat | Same results | Same results |
+| Review notes | Marked a valid example missing from the textbook as wrong | Correctly "not in textbook" |
+| Grading | All-or-nothing, and inconsistent ("systems maybe" full marks, "labeled maybe" zero) | Partial marks |
+| Teacher assistant | Fewer, less targeted searches and thinner answers | Chains 4 to 5 tools and retries |
+| Assignment planner | Reads the request poorly and plans nothing, so code fills the gaps | Plans well; code mostly checks |
+| Second opinion | Useful: caught the harsh zeros | Useful |
+| Speed | About 1 second per call, no pacing | Paced to 10 calls a minute on the free tier |
+
+The code safeguards (reading numbers from the request, filling gaps, balancing marks, falling back
+to the newest item when a tool gets a made-up id) make an 8B model usable. A stronger model judges
+better. If the GPU has room, try `qwen2.5:14b` or larger.
+
+**Secure your server.** Ollama has no login, and a RunPod proxy address is public. Anyone who
+knows the address can use your GPU. Keep the address private, stop the pod when you're not using
+it, or put an authenticating proxy in front of it and set `OLLAMA_API_KEY`.
+
 ## Settings
 
 Set these in `.env`. See [.env.example](.env.example) for the full list.
@@ -539,6 +593,11 @@ Set these in `.env`. See [.env.example](.env.example) for the full list.
 | `GEMINI_EMBEDDING_MODEL` | `models/gemini-embedding-001` | The model for meaning search |
 | `GEMINI_EMBEDS_PER_MINUTE` | `90` | Paces background indexing; the free tier allows 100 |
 | `DOCUMENTOR_AGENT_MAX_STEPS` | `6` | How many tool rounds the assistant may take per question |
+| `LLM_PROVIDER` | `gemini` | `gemini`, or `ollama` for your own models |
+| `OLLAMA_BASE_URL` | none | Your Ollama server, for example a RunPod proxy address |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Chat model; must support tool calling |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model for meaning search |
+| `OLLAMA_NUM_CTX` | `16384` | Context size asked for on each request |
 | `PORT` | `10000` | Local port |
 | `DOCUMENTOR_DATA_DIR` | `data` | Where your library and results are saved |
 
@@ -548,8 +607,9 @@ Set these in `.env`. See [.env.example](.env.example) for the full list.
   cross-site requests. Setting `DOCUMENTOR_ALLOW_REMOTE=1` lets anyone who can reach it use your
   documents and API quota, so don't do that on a network you don't trust.
 - **What leaves your computer:** passages from your documents, students' answers when grading or
-  getting a second opinion, and what the assistant looks up for you are sent to Google's Gemini
-  API. Check Google's data terms before using sensitive material.
+  getting a second opinion, and what the assistant looks up for you are sent to the model: Google's
+  Gemini API, or your own Ollama server if you set one. Check the terms of whichever you use before
+  using sensitive material.
 - **What is stored:** extracted text, results, the question bank and search embeddings in
   `data/documentor.sqlite3`, and agent conversations and plans in `data/agents.sqlite3`. Uploaded
   files aren't kept. Students' work is stored the same way, with their names. Delete documents,
@@ -561,7 +621,7 @@ Set these in `.env`. See [.env.example](.env.example) for the full list.
 ```
 app.py              Entry point
 core/config.py      Settings
-core/ai.py          Gemini client: timeouts, pacing, retries, friendly errors
+core/ai.py          Gemini and Ollama clients: timeouts, pacing, retries, friendly errors
 core/documents.py   Reads .docx, .pdf, .txt and .md
 core/retrieval.py   Splits documents and finds relevant passages
 core/services.py    Homework checking and writing, notes review, chat, and the review logic

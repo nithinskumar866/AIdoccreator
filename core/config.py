@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "gemini-flash-lite-latest"
 DEFAULT_EMBEDDING_MODEL = "models/gemini-embedding-001"
+PROVIDERS = ("gemini", "ollama")
 
 
 def _int(name: str, default: int) -> int:
@@ -36,6 +37,26 @@ class Settings:
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     embeds_per_minute: int = 90  # the free tier allows 100 texts a minute
     agent_max_steps: int = 6
+    # Your own models on Ollama, for example on a RunPod GPU, instead of Gemini.
+    provider: str = "gemini"
+    ollama_url: str = ""
+    ollama_model: str = "llama3.1:8b"
+    ollama_embed_model: str = "nomic-embed-text"
+    ollama_api_key: str = ""
+    ollama_num_ctx: int = 16384
+    ollama_rpm: int = 0  # 0 means no pacing: it's your own GPU
+
+    @property
+    def ai_ready(self) -> bool:
+        return bool(self.ollama_url) if self.provider == "ollama" else bool(self.api_key)
+
+    @property
+    def active_model(self) -> str:
+        return self.ollama_model if self.provider == "ollama" else self.model
+
+    @property
+    def active_embedding_model(self) -> str:
+        return f"ollama/{self.ollama_embed_model}" if self.provider == "ollama" else self.embedding_model
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -55,4 +76,12 @@ class Settings:
             or DEFAULT_EMBEDDING_MODEL,
             embeds_per_minute=_int("GEMINI_EMBEDS_PER_MINUTE", 90),
             agent_max_steps=_int("DOCUMENTOR_AGENT_MAX_STEPS", 6),
+            provider=provider if (provider := os.getenv("LLM_PROVIDER", "gemini").strip().lower()) in PROVIDERS
+            else "gemini",
+            ollama_url=os.getenv("OLLAMA_BASE_URL", "").strip().rstrip("/"),
+            ollama_model=os.getenv("OLLAMA_MODEL", "llama3.1:8b").strip() or "llama3.1:8b",
+            ollama_embed_model=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text").strip() or "nomic-embed-text",
+            ollama_api_key=os.getenv("OLLAMA_API_KEY", "").strip(),
+            ollama_num_ctx=_int("OLLAMA_NUM_CTX", 16384),
+            ollama_rpm=_int("OLLAMA_REQUESTS_PER_MINUTE", 0),
         )

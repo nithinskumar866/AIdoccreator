@@ -22,8 +22,8 @@ def _agent_job(fn):
     @wraps(fn)
     def run(self: "Agents", *args: Any, **kwargs: Any):
         if self.model is None:
-            raise AIError("auth", "No Gemini API key is set. Add GEMINI_API_KEY to your .env file "
-                                  "and restart DocuMentor.")
+            raise AIError("auth", "No AI is set up. Add GEMINI_API_KEY, or LLM_PROVIDER=ollama with "
+                                  "OLLAMA_BASE_URL, to your .env file and restart DocuMentor.")
         try:
             return fn(self, *args, **kwargs)
         except (AIError, ServiceError):
@@ -41,8 +41,9 @@ class Agents:
         self.store = services.store
         self.model = model
         self.settings = settings
-        self.search = HybridSearch(self.store, embeddings, settings.embedding_model,
-                                   settings.embeds_per_minute)
+        own_gpu = settings.provider == "ollama"  # no free-tier limit to stay under
+        self.search = HybridSearch(self.store, embeddings, settings.active_embedding_model,
+                                   100_000 if own_gpu else settings.embeds_per_minute)
         connection = sqlite3.connect(settings.data_dir / "agents.sqlite3", check_same_thread=False)
         self.checkpointer = SqliteSaver(connection)
         self.checkpointer.setup()
@@ -51,8 +52,8 @@ class Agents:
     def _lock(self, thread_id: str) -> threading.Lock:
         return self._locks.setdefault(thread_id, threading.Lock())
 
-    def context(self, document_ids: list[str] | None = None) -> ToolContext:
-        return ToolContext(self.store, self.search, document_ids)
+    def context(self, document_ids: list[str] | None = None, roles: set[str] | None = None) -> ToolContext:
+        return ToolContext(self.store, self.search, document_ids, roles)
 
     # ---------- indexing for meaning search (no model needed for keyword fallback) ----------
     def index_document(self, params: dict, progress: Progress) -> dict:
@@ -62,7 +63,7 @@ class Agents:
         try:
             return self.search.index(document, progress)
         except Exception as exc:
-            raise friendly(exc, self.settings.embedding_model) from exc
+            raise friendly(exc, self.settings.active_embedding_model) from exc
 
     # ---------- teacher assistant ----------
     @_agent_job
@@ -112,7 +113,9 @@ class Agents:
     # ---------- grading second opinion ----------
     @_agent_job
     def second_opinion(self, params: dict, progress: Progress) -> dict:
-        return second_opinion.review(self.model, self.context, self.store, params, progress)
+        # Only the textbook and notes are an authority on what's right; a homework sheet isn't.
+        return second_opinion.review(self.model, lambda: self.context(roles={"textbook", "notes"}),
+                                     self.store, params, progress)
 
     # ---------- threads ----------
     def view(self, thread: dict) -> dict:

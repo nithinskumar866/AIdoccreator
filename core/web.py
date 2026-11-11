@@ -12,7 +12,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 from . import bank, documents, grading, services
-from .ai import GeminiClient, UnconfiguredAI
+from .ai import GeminiClient, OllamaClient, UnconfiguredAI
 from .config import BASE_DIR, Settings
 from .export import export_docx
 from .jobs import JobRunner
@@ -65,15 +65,16 @@ def status():
     settings: Settings = current_app.config["SETTINGS"]
     store = _store()
     return jsonify(
-        ai_configured=bool(settings.api_key) or not isinstance(_services().ai, UnconfiguredAI),
-        model=getattr(_services().ai, "model", settings.model),
+        ai_configured=not isinstance(_services().ai, UnconfiguredAI),
+        model=getattr(_services().ai, "model", settings.active_model),
+        provider=settings.provider,
         max_upload_mb=settings.max_upload_mb,
         counts={"documents": len(store.list_documents()), "results": len(store.list_results()),
                 "chats": len(store.list_chats()), "bank": store.bank_count()},
         question_types=services.QUESTION_TYPES,
         max_questions=services.MAX_QUESTIONS,
         agents=_agents().model is not None,
-        embedding_model=settings.embedding_model,
+        embedding_model=settings.active_embedding_model,
     )
 
 
@@ -433,9 +434,15 @@ def create_app(settings: Settings | None = None, ai=None, agent_model=None, embe
         from .agents.models import build_models
         agent_model, embeddings = build_models(settings)
     if ai is None:
-        ai = (GeminiClient(settings.api_key, settings.model, settings.ai_timeout_s,
-                           settings.ai_max_retries, settings.ai_rpm)
-              if settings.api_key else UnconfiguredAI())
+        if settings.provider == "ollama" and settings.ollama_url:
+            ai = OllamaClient(settings.ollama_url, settings.ollama_model, settings.ai_timeout_s * 2,
+                              settings.ai_max_retries, settings.ollama_num_ctx, settings.ollama_api_key,
+                              settings.ollama_rpm)
+        elif settings.provider == "gemini" and settings.api_key:
+            ai = GeminiClient(settings.api_key, settings.model, settings.ai_timeout_s,
+                              settings.ai_max_retries, settings.ai_rpm)
+        else:
+            ai = UnconfiguredAI()
     store = Store(settings.data_dir)
     service = Services(store, ai)
     from .agents import Agents
