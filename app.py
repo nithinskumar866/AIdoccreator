@@ -1,80 +1,36 @@
-from flask import Flask, request, render_template, send_file
-from compare_docs import load_document, compare_textbook_notes, validate_homework, save_to_docx
-from dotenv import load_dotenv
-import os
+"""DocuMentor entry point. Run `python app.py`, then open the address it prints."""
+from __future__ import annotations
 
-# ✅ Load environment variables
-load_dotenv()
+import logging
+import sys
 
-app = Flask(__name__)
+from core.config import Settings
+from core.web import LOOPBACK, create_app
 
-# ✅ Upload folder
-UPLOAD_FOLDER = 'uploads'
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-# ✅ Port configuration (Render uses PORT 10000 by default)
-PORT = int(os.getenv("PORT", 10000))
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    results = ""
-    notes_path, homework_path = None, None
-
-    if request.method == 'POST':
-        # ✅ Get uploaded files
-        textbook = request.files.get('textbook')
-        notes = request.files.get('notes')
-        homework = request.files.get('homework')
-
-        if not (textbook and notes and homework):
-            results = "Please upload all three files: textbook, notes, and homework."
-        else:
-            # ✅ Save uploaded files
-            textbook_path = os.path.join(UPLOAD_FOLDER, textbook.filename)
-            notes_path = os.path.join(UPLOAD_FOLDER, notes.filename)
-            homework_path = os.path.join(UPLOAD_FOLDER, homework.filename)
-
-            textbook.save(textbook_path)
-            notes.save(notes_path)
-            homework.save(homework_path)
-
-            try:
-                # ✅ Load document content
-                textbook_text = load_document(textbook_path)
-                notes_text = load_document(notes_path)
-                homework_text = load_document(homework_path)
-
-                # ✅ Process notes comparison
-                corrected_notes = compare_textbook_notes(textbook_text, notes_text)
-                corrected_notes_path = os.path.join(UPLOAD_FOLDER, "Corrected_Notes.docx")
-                save_to_docx(corrected_notes, corrected_notes_path)
-
-                # ✅ Process homework validation
-                corrected_homework = validate_homework(textbook_text, notes_text, homework_text)
-                corrected_homework_path = os.path.join(UPLOAD_FOLDER, "Corrected_Homework.docx")
-                save_to_docx(corrected_homework, corrected_homework_path)
-
-                results = "✅ Notes and Homework have been corrected!"
-                notes_path = corrected_notes_path
-                homework_path = corrected_homework_path
-
-            except Exception as e:
-                results = f"An error occurred: {str(e)}"
-
-    return render_template('index.html', results=results, notes_path=notes_path, homework_path=homework_path)
+settings = Settings.from_env()
+app = create_app(settings)
 
 
-@app.route('/download')
-def download():
-    """Route to download the corrected documents."""
-    file_path = request.args.get('path')
-    if file_path and os.path.exists(file_path):
-        return send_file(file_path, as_attachment=True)
-    else:
-        return "File not found."
+def main() -> int:
+    if settings.host.lower() not in LOOPBACK and not settings.allow_remote:
+        print(
+            "DocuMentor has no login, so it only runs on this computer by default.\n"
+            f"Refusing to listen on {settings.host}. To accept the risk of anyone on the network "
+            "using your documents and API quota, set DOCUMENTOR_ALLOW_REMOTE=1.",
+            file=sys.stderr,
+        )
+        return 1
+    if not settings.api_key:
+        print("Note: GEMINI_API_KEY isn't set, so AI features are off. Copy .env.example to .env.")
+
+    from waitress import serve
+
+    print(f"DocuMentor is running at http://{settings.host}:{settings.port}  (Ctrl+C to stop)")
+    serve(app, host=settings.host, port=settings.port, threads=8)
+    return 0
 
 
-# ✅ Production-ready configuration for Render
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+if __name__ == "__main__":
+    sys.exit(main())
